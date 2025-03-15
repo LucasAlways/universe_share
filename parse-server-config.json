@@ -1,0 +1,25 @@
+{
+  "appId": "universe_share_app_id",
+  "masterKey": "universe_share_master_key",
+  "appName": "泰康共享平台",
+  "cloud": "./cloud/main.js",
+  "databaseURI": "mongodb://localhost:27017/universe_share",
+  "serverURL": "http://192.168.1.11:1337/parse",
+  "publicServerURL": "http://192.168.1.11:1337/parse",
+  "allowClientClassCreation": true,
+  "allowExpiredAuthDataToken": true,
+  "enableAnonymousUsers": false,
+  "filesAdapter": {
+    "module": "@parse/fs-files-adapter",
+    "options": {
+      "filesSubDirectory": "files"
+    }
+  },
+  "maxUploadSize": "20mb",
+  "liveQuery": {
+    "classNames": []
+  },
+  "verifyUserEmails": false,
+  "emailVerifyTokenValidityDuration": 24,
+  "preventLoginWithUnverifiedEmail": false
+} 

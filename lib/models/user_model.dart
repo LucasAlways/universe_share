@@ -50,12 +50,25 @@ class UserModel extends ChangeNotifier {
   }
 
   // 注册
-  Future<bool> signUp(String username, String email, String password) async {
+  Future<bool> signUp(
+    String username,
+    String email,
+    String password, {
+    Map<String, dynamic>? userCustomFields,
+  }) async {
     setLoading(true);
     setErrorMessage('');
 
     try {
       final user = ParseUser.createUser(username, password, email);
+
+      // 添加自定义字段
+      if (userCustomFields != null) {
+        userCustomFields.forEach((key, value) {
+          user.set(key, value);
+        });
+      }
+
       final response = await user.signUp();
 
       if (response.success) {

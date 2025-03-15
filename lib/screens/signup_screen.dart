@@ -14,6 +14,7 @@ class _SignupScreenState extends State<SignupScreen> {
   final _formKey = GlobalKey<FormState>();
   final _usernameController = TextEditingController();
   final _emailController = TextEditingController();
+  final _phoneController = TextEditingController(); // 添加手机号控制器
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
   bool _obscurePassword = true;
@@ -23,6 +24,7 @@ class _SignupScreenState extends State<SignupScreen> {
   void dispose() {
     _usernameController.dispose();
     _emailController.dispose();
+    _phoneController.dispose(); // 释放手机号控制器
     _passwordController.dispose();
     _confirmPasswordController.dispose();
     super.dispose();
@@ -43,10 +45,18 @@ class _SignupScreenState extends State<SignupScreen> {
   Future<void> _signup() async {
     if (_formKey.currentState!.validate()) {
       final userModel = Provider.of<UserModel>(context, listen: false);
+
+      // 创建用户自定义字段 Map
+      final Map<String, dynamic> userCustomFields = {
+        'phone': _phoneController.text,
+      };
+
+      // 调用修改过的 signUp 方法
       final success = await userModel.signUp(
         _usernameController.text,
         _emailController.text,
         _passwordController.text,
+        userCustomFields: userCustomFields,
       );
 
       if (success && mounted) {
@@ -79,7 +89,7 @@ class _SignupScreenState extends State<SignupScreen> {
                   ),
                   const SizedBox(height: 10),
                   const Text(
-                    '创建新账号',
+                    '泰康共享平台', // 将应用名称改为"泰康共享平台"
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                   ),
@@ -115,6 +125,26 @@ class _SignupScreenState extends State<SignupScreen> {
                         r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
                       ).hasMatch(value)) {
                         return '请输入有效的电子邮件地址';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  // 添加手机号输入字段
+                  TextFormField(
+                    controller: _phoneController,
+                    keyboardType: TextInputType.phone,
+                    decoration: const InputDecoration(
+                      labelText: '手机号',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.phone),
+                    ),
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return '请输入手机号';
+                      }
+                      if (!RegExp(r'^1[3-9]\d{9}$').hasMatch(value)) {
+                        return '请输入有效的手机号';
                       }
                       return null;
                     },

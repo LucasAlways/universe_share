@@ -14,8 +14,20 @@ void main() async {
     const SystemUiOverlayStyle(statusBarColor: Colors.transparent),
   );
 
+  // 捕获全局错误
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    print('Flutter错误: ${details.exception}');
+  };
+
   // 初始化Parse服务
-  await ParseService.initialize();
+  try {
+    await ParseService.initialize();
+    print('Parse服务初始化成功');
+  } catch (e) {
+    print('Parse服务初始化失败: $e');
+    // 你可以在这里添加更多的错误处理逻辑
+  }
 
   runApp(const MyApp());
 }
@@ -28,7 +40,7 @@ class MyApp extends StatelessWidget {
     return ChangeNotifierProvider(
       create: (context) => UserModel(),
       child: MaterialApp(
-        title: '二维码共享平台',
+        title: '泰康共享平台',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
@@ -53,6 +65,43 @@ class MyApp extends StatelessWidget {
                 body: Center(child: CircularProgressIndicator()),
               );
             }
+
+            // 处理错误情况
+            if (snapshot.hasError) {
+              return Scaffold(
+                body: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.error_outline,
+                        size: 60,
+                        color: Colors.red,
+                      ),
+                      const SizedBox(height: 16),
+                      const Text('连接服务器失败', style: TextStyle(fontSize: 18)),
+                      const SizedBox(height: 8),
+                      Text(
+                        '${snapshot.error}',
+                        style: const TextStyle(color: Colors.grey),
+                      ),
+                      const SizedBox(height: 24),
+                      ElevatedButton(
+                        onPressed: () {
+                          // 重新检查登录状态
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(builder: (_) => const MyApp()),
+                          );
+                        },
+                        child: const Text('重试'),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+
             final bool isLoggedIn = snapshot.data ?? false;
             return isLoggedIn ? const HomeScreen() : const LoginScreen();
           },
