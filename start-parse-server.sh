@@ -18,15 +18,35 @@ else
   echo "✅ MongoDB正在运行"
 fi
 
-# 启动Parse Server
+# 确保端口未被占用
+echo "确保端口未被占用..."
+PORT_1337=$(lsof -ti:1337) || true
+PORT_4040=$(lsof -ti:4040) || true
+
+if [ -n "$PORT_1337" ]; then
+  echo "端口1337已被占用，尝试释放..."
+  kill -9 $PORT_1337 || true
+fi
+
+if [ -n "$PORT_4040" ]; then
+  echo "端口4040已被占用，尝试释放..."
+  kill -9 $PORT_4040 || true
+fi
+
+sleep 1
+
+# 启动Parse Server，直接使用配置文件
 echo "启动Parse Server..."
-parse-server --config parse-server-config.json --host 0.0.0.0 &
+parse-server parse-server-config.json &
 PARSE_SERVER_PID=$!
 echo "✅ Parse Server已启动 (PID: $PARSE_SERVER_PID)"
 
+# 等待Parse Server完全启动
+sleep 2
+
 # 启动Parse Dashboard
 echo "启动Parse Dashboard..."
-parse-dashboard --config parse-dashboard-config.json --port 4040 --host 0.0.0.0 &
+parse-dashboard --dev --appId universe_share_app_id --masterKey universe_share_master_key --serverURL http://localhost:1337/parse --appName "泰康共享平台" &
 PARSE_DASHBOARD_PID=$!
 echo "✅ Parse Dashboard已启动 (PID: $PARSE_DASHBOARD_PID)"
 

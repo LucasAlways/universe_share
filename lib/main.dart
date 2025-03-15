@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'models/user_model.dart';
+import 'models/role_model.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'services/parse_service.dart';
@@ -37,8 +38,11 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (context) => UserModel(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (context) => UserModel()),
+        ChangeNotifierProvider(create: (context) => RoleModel()),
+      ],
       child: MaterialApp(
         title: '泰康共享平台',
         debugShowCheckedModeBanner: false,
@@ -55,6 +59,12 @@ class MyApp extends StatelessWidget {
               backgroundColor: Colors.blue,
               foregroundColor: Colors.white,
             ),
+          ),
+          pageTransitionsTheme: const PageTransitionsTheme(
+            builders: {
+              TargetPlatform.android: ZoomPageTransitionsBuilder(),
+              TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+            },
           ),
         ),
         home: FutureBuilder<bool>(

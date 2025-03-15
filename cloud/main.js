@@ -10,8 +10,16 @@ Parse.Cloud.afterSave(Parse.User, async (request) => {
   if (user.isNew()) {
     console.log(`新用户注册: ${user.get('username')}`);
     
-    // 可以在这里执行一些新用户注册后的操作
-    // 例如: 创建默认数据、发送欢迎邮件等
+    // 为新用户设置默认角色 - 消费者
+    if (!user.has('userRole')) {
+      user.set('userRole', 'consumer');
+      try {
+        await user.save(null, { useMasterKey: true });
+        console.log(`已为用户 ${user.get('username')} 设置默认角色: consumer`);
+      } catch (error) {
+        console.error('设置默认角色失败:', error);
+      }
+    }
   }
 });
 
@@ -32,10 +40,39 @@ Parse.Cloud.define('getUserProfile', async (request) => {
       username: user.get('username'),
       email: user.get('email'),
       phone: user.get('phone'),
+      userRole: user.get('userRole') || 'consumer', // 默认为消费者
       createdAt: user.get('createdAt')
     };
   } catch (error) {
     throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND, '未找到用户');
+  }
+});
+
+// 设置用户角色
+Parse.Cloud.define('setUserRole', async (request) => {
+  if (!request.user) {
+    throw new Parse.Error(Parse.Error.INVALID_SESSION_TOKEN, '用户未登录');
+  }
+  
+  const { role } = request.params;
+  
+  // 验证角色有效性
+  if (!['consumer', 'producer', 'both'].includes(role)) {
+    throw new Parse.Error(Parse.Error.INVALID_PARAMS, '无效的角色类型');
+  }
+  
+  try {
+    const user = request.user;
+    user.set('userRole', role);
+    await user.save(null, { useMasterKey: true });
+    
+    return {
+      success: true,
+      message: '角色设置成功',
+      role: role
+    };
+  } catch (error) {
+    throw new Parse.Error(Parse.Error.INTERNAL_SERVER_ERROR, '设置角色失败: ' + error.message);
   }
 });
 

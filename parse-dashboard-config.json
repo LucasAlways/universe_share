@@ -1,7 +1,7 @@
 {
   "apps": [
     {
-      "serverURL": "http://192.168.1.11:1337/parse",
+      "serverURL": "http://localhost:1337/parse",
       "appId": "universe_share_app_id",
       "masterKey": "universe_share_master_key",
       "appName": "泰康共享平台",
@@ -14,5 +14,6 @@
       "pass": "password"
     }
   ],
-  "useEncryptedPasswords": false
+  "useEncryptedPasswords": false,
+  "allowInsecureHTTP": true
 } 
