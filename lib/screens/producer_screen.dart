@@ -348,11 +348,9 @@ class _CreateQrCodeScreenState extends State<CreateQrCodeScreen> {
       // 尝试启动悬浮窗
       bool result = await FloatingWindowService.startFloatingWindow();
       if (result) {
-        // 成功启动悬浮窗，延迟一下再退出页面，以确保服务已经启动
-        await Future.delayed(const Duration(milliseconds: 500));
-        if (mounted) {
-          Navigator.of(context).pop();
-        }
+        // 成功启动悬浮窗，由原生端处理退出到桌面的操作
+        // 这里不需要执行任何操作，原生端会自动跳转到桌面
+        print('悬浮窗启动成功，等待原生端跳转到桌面');
       } else {
         if (mounted) {
           ScaffoldMessenger.of(
