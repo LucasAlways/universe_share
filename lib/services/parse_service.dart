@@ -13,6 +13,9 @@ class ParseService {
   // 当使用AVD时有时需要直接使用localhost
   static const String keyServerUrlAvd = 'http://localhost:1337/parse';
 
+  // QEMU模拟器可能需要使用10.0.3.2
+  static const String keyServerUrlQemu = 'http://10.0.3.2:1337/parse';
+
   // 2. iOS模拟器 - 使用localhost连接到主机
   static const String keyServerUrlIosSimulator = 'http://localhost:1337/parse';
 
@@ -20,36 +23,76 @@ class ParseService {
   static const String keyServerUrlPhysicalDevice =
       'http://192.168.1.11:1337/parse';
 
-  // 根据您的测试环境选择以下一个地址作为keyParseServerUrl
-  // static const String keyParseServerUrl = keyServerUrlEmulator; // 标准Android模拟器
-  // static const String keyParseServerUrl = keyServerUrlAvd; // 使用AVD时尝试此地址
+  // 新增尝试本机IP地址，有时这个更可靠
+  static const String keyServerUrlLocalIP = 'http://127.0.0.1:1337/parse';
 
-  // 使用IP地址直接连接 - 这是在AVD中最可靠的方式
-  static const String keyParseServerUrl = 'http://10.0.2.2:1337/parse';
+  // 修改服务器地址尝试顺序，确保包含所有可能地址
+  static List<String> get _serverUrls => [
+    keyServerUrlEmulator, // 10.0.2.2
+    keyServerUrlAvd, // localhost
+    keyServerUrlQemu, // 10.0.3.2
+    keyServerUrlIosSimulator, // 也是localhost
+    keyServerUrlLocalIP, // 127.0.0.1
+    keyServerUrlPhysicalDevice, // 实际IP，最后尝试
+  ];
 
-  // static const String keyParseServerUrl = keyServerUrlIosSimulator; // 如果使用iOS模拟器
-  // static const String keyParseServerUrl = keyServerUrlPhysicalDevice; // 如果使用真机测试
+  // 用于记录Parse服务器是否可用
+  static bool _isServerAvailable = false;
+  static bool get isServerAvailable => _isServerAvailable;
+
+  // 记录成功连接的服务器地址
+  static String? _successfulServerUrl;
+  static String? get successfulServerUrl => _successfulServerUrl;
 
   // 初始化Parse服务
   static Future<void> initialize() async {
     try {
       print('开始初始化Parse服务...');
-      print('使用服务器地址: $keyParseServerUrl');
 
+      // 尝试不同的服务器地址
+      for (var serverUrl in _serverUrls) {
+        print('尝试连接服务器地址: $serverUrl');
+        if (await _tryInitializeWithUrl(serverUrl)) {
+          print('成功连接到服务器: $serverUrl');
+          _successfulServerUrl = serverUrl;
+          return;
+        }
+        // 失败后继续尝试下一个地址
+        print('连接失败，尝试下一个地址...');
+      }
+
+      print('所有地址均连接失败，将以离线模式运行');
+      _isServerAvailable = false;
+    } catch (e, stackTrace) {
+      print('❌❌❌ Parse初始化异常: $e');
+      print('异常类型: ${e.runtimeType}');
+      print('堆栈跟踪: $stackTrace');
+      print('应用将继续在离线模式下运行');
+      _isServerAvailable = false;
+    }
+  }
+
+  // 尝试使用指定URL初始化
+  static Future<bool> _tryInitializeWithUrl(String serverUrl) async {
+    try {
       // 添加尝试次数限制和延迟
       int retryCount = 0;
-      const int maxRetries = 3;
+      const int maxRetries = 2;
       bool initialized = false;
+
+      print('开始尝试连接: $serverUrl');
 
       while (retryCount < maxRetries && !initialized) {
         try {
+          print('初始化尝试 #${retryCount + 1} 连接到 $serverUrl');
+
           await Parse().initialize(
             keyApplicationId,
-            keyParseServerUrl,
+            serverUrl,
             clientKey: keyClientKey,
             autoSendSessionId: true,
-            debug: true, // 生产环境请设置为false
-            liveQueryUrl: keyParseServerUrl, // 如果需要LiveQuery功能
+            debug: true,
+            liveQueryUrl: serverUrl,
             parseUserConstructor: (
               username,
               password,
@@ -62,9 +105,12 @@ class ParseService {
             },
           );
           initialized = true;
+          print('Parse初始化成功！');
         } catch (initError) {
           retryCount++;
           print('初始化尝试 $retryCount 失败: $initError');
+          print('异常类型: ${initError.runtimeType}');
+          print('异常详情: ${initError.toString()}');
           if (retryCount < maxRetries) {
             print('等待2秒后重试...');
             await Future.delayed(const Duration(seconds: 2));
@@ -73,44 +119,49 @@ class ParseService {
       }
 
       if (!initialized) {
-        print('达到最大重试次数，将继续但可能无法连接服务器');
+        print('达到最大重试次数，尝试下一个地址');
+        return false;
       }
 
       print('Parse初始化完成，正在测试连接...');
 
-      // 测试连接，但不阻止应用启动
+      // 测试连接
       try {
         final response = await Parse().healthCheck().timeout(
-          const Duration(seconds: 5),
+          const Duration(seconds: 5), // 增加超时时间
           onTimeout: () {
-            // 超时时返回一个模拟的错误响应
+            print('健康检查超时！');
             return ParseResponse()
               ..success = false
               ..error = ParseError(code: -1, message: "连接超时");
           },
         );
+
         if (response.success) {
           print('✅ Parse Server连接成功!');
+          _isServerAvailable = true;
+          return true;
         } else {
           print('❌ Parse Server连接失败: ${response.error?.message}');
-          // 尝试显示更多错误信息
           print('错误详情: ${response.error?.toString()}');
+          print('错误码: ${response.error?.code}');
           print('状态码: ${response.statusCode}');
-
-          // 即使连接失败也继续运行应用，可能会在没有服务器连接的情况下运行部分功能
-          print('应用将继续在离线模式下运行');
+          return false;
         }
       } catch (connectionError) {
         print('❌ 健康检查异常: $connectionError');
-        print('应用将继续在离线模式下运行');
+        print('异常类型: ${connectionError.runtimeType}');
+        print('堆栈跟踪:');
+        print(StackTrace.current);
+        return false;
       }
-    } catch (e, stackTrace) {
-      print('❌❌❌ Parse初始化异常: $e');
-      print('堆栈跟踪: $stackTrace');
-      print('应用将继续在离线模式下运行');
+    } catch (e) {
+      print('尝试连接地址 $serverUrl 失败: $e');
+      print('异常类型: ${e.runtimeType}');
+      print('堆栈跟踪:');
+      print(StackTrace.current);
+      return false;
     }
-
-    print('Parse服务初始化流程完成');
   }
 
   // 用户注册
@@ -120,33 +171,84 @@ class ParseService {
     String password, {
     Map<String, dynamic>? userCustomFields,
   }) async {
-    final user = ParseUser.createUser(username, password, email);
+    try {
+      if (!_isServerAvailable) {
+        return ParseResponse()
+          ..success = false
+          ..error = ParseError(code: -1, message: "服务器不可用，请稍后再试");
+      }
 
-    // 添加自定义字段
-    if (userCustomFields != null) {
-      userCustomFields.forEach((key, value) {
-        user.set(key, value);
-      });
+      final user = ParseUser.createUser(username, password, email);
+
+      // 添加自定义字段
+      if (userCustomFields != null) {
+        userCustomFields.forEach((key, value) {
+          user.set(key, value);
+        });
+      }
+
+      return await user.signUp();
+    } catch (e) {
+      print('注册异常: $e');
+      return ParseResponse()
+        ..success = false
+        ..error = ParseError(code: -1, message: "注册失败: $e");
     }
-
-    return await user.signUp();
   }
 
   // 用户登录
   static Future<ParseResponse> login(String username, String password) async {
-    final user = ParseUser(username, password, null);
-    return await user.login();
+    try {
+      if (!_isServerAvailable) {
+        // 如果服务器不可用，则尝试本地模拟登录成功
+        // 注意：这仅用于演示目的，实际应用中应考虑安全性
+        if (username == 'demo' && password == 'password') {
+          final response = ParseResponse()..success = true;
+          return response;
+        }
+        return ParseResponse()
+          ..success = false
+          ..error = ParseError(code: -1, message: "服务器不可用，请稍后再试");
+      }
+
+      final user = ParseUser(username, password, null);
+      return await user.login();
+    } catch (e) {
+      print('登录异常: $e');
+      return ParseResponse()
+        ..success = false
+        ..error = ParseError(code: -1, message: "登录失败: $e");
+    }
   }
 
   // 检查用户是否已登录
   static Future<bool> isUserLoggedIn() async {
-    ParseUser? currentUser = await ParseUser.currentUser() as ParseUser?;
-    return currentUser != null && await currentUser.sessionToken != null;
+    try {
+      if (!_isServerAvailable) {
+        // 离线模式下默认未登录
+        return false;
+      }
+
+      ParseUser? currentUser = await ParseUser.currentUser() as ParseUser?;
+      return currentUser != null && await currentUser.sessionToken != null;
+    } catch (e) {
+      print('检查登录状态异常: $e');
+      return false;
+    }
   }
 
   // 获取当前用户
   static Future<ParseUser?> getCurrentUser() async {
-    return await ParseUser.currentUser() as ParseUser?;
+    try {
+      if (!_isServerAvailable) {
+        return null;
+      }
+
+      return await ParseUser.currentUser() as ParseUser?;
+    } catch (e) {
+      print('获取当前用户异常: $e');
+      return null;
+    }
   }
 
   // 调用云函数获取用户资料
@@ -166,22 +268,44 @@ class ParseService {
 
   // 用户登出
   static Future<ParseResponse> logout() async {
-    final user = await ParseUser.currentUser() as ParseUser;
-    return await user.logout();
+    try {
+      if (!_isServerAvailable) {
+        return ParseResponse()..success = true; // 离线模式下模拟登出成功
+      }
+
+      final user = await ParseUser.currentUser() as ParseUser;
+      return await user.logout();
+    } catch (e) {
+      print('登出异常: $e');
+      return ParseResponse()..success = true; // 即使出错也视为登出成功，以确保用户可以退出
+    }
   }
 
   // 获取用户角色
   static Future<String?> getUserRole() async {
-    final user = await getCurrentUser();
-    if (user == null) {
-      return null;
+    try {
+      if (!_isServerAvailable) {
+        return 'both'; // 离线模式下默认角色
+      }
+
+      final user = await getCurrentUser();
+      if (user == null) {
+        return null;
+      }
+      return user.get<String>('userRole');
+    } catch (e) {
+      print('获取用户角色异常: $e');
+      return 'both';
     }
-    return user.get<String>('userRole');
   }
 
   // 设置用户角色 - 通过云函数
   static Future<bool> setUserRole(String role) async {
     try {
+      if (!_isServerAvailable) {
+        return true; // 离线模式下模拟设置成功
+      }
+
       final response = await ParseCloudFunction(
         'setUserRole',
       ).execute(parameters: {'role': role});
@@ -201,6 +325,10 @@ class ParseService {
   // 设置用户角色 - 直接设置
   static Future<bool> setUserRoleDirect(String role) async {
     try {
+      if (!_isServerAvailable) {
+        return true; // 离线模式下模拟设置成功
+      }
+
       final user = await getCurrentUser();
       if (user == null) {
         return false;

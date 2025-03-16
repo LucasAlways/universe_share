@@ -9,15 +9,15 @@ enum UserRole {
 }
 
 class RoleModel extends ChangeNotifier {
-  UserRole _currentRole = UserRole.consumer; // 默认为消费者
+  UserRole _currentRole = UserRole.both;
   bool _isLoading = false;
+  bool _isOfflineMode = false;
 
   UserRole get currentRole => _currentRole;
   bool get isLoading => _isLoading;
-  bool get isConsumer =>
-      _currentRole == UserRole.consumer || _currentRole == UserRole.both;
-  bool get isProducer =>
-      _currentRole == UserRole.producer || _currentRole == UserRole.both;
+  bool get isOfflineMode => _isOfflineMode;
+  bool get isConsumer => _currentRole == UserRole.consumer;
+  bool get isProducer => _currentRole == UserRole.producer;
 
   // 设置加载状态
   void setLoading(bool loading) {
@@ -28,37 +28,45 @@ class RoleModel extends ChangeNotifier {
   // 设置用户角色
   void setUserRole(UserRole role) {
     _currentRole = role;
+
+    // 如果不是离线模式，则保存角色到服务器
+    if (!_isOfflineMode) {
+      _saveRoleToUser(role);
+    }
+
     notifyListeners();
-    _saveRoleToUser(role); // 保存角色到用户数据
   }
 
   // 从服务器获取用户角色
   Future<void> fetchUserRole() async {
-    setLoading(true);
-
     try {
-      final roleString = await ParseService.getUserRole();
-      if (roleString != null) {
-        switch (roleString) {
+      setLoading(true);
+
+      final userRole = await ParseService.getUserRole();
+
+      if (userRole == null) {
+        // 如果没有获取到角色，默认为both
+        _currentRole = UserRole.both;
+      } else {
+        // 根据字符串设置角色
+        switch (userRole) {
           case 'consumer':
             _currentRole = UserRole.consumer;
             break;
           case 'producer':
             _currentRole = UserRole.producer;
             break;
-          case 'both':
-            _currentRole = UserRole.both;
-            break;
           default:
-            _currentRole = UserRole.consumer; // 默认为消费者
+            _currentRole = UserRole.both;
         }
-      } else {
-        // 用户没有设置角色，设置默认角色
-        _currentRole = UserRole.consumer;
-        _saveRoleToUser(_currentRole);
       }
+
+      _isOfflineMode = false;
     } catch (e) {
       print('获取用户角色失败: $e');
+      // 在出错时设置离线模式并使用默认角色
+      _isOfflineMode = true;
+      _currentRole = UserRole.both;
     } finally {
       setLoading(false);
     }
@@ -66,27 +74,31 @@ class RoleModel extends ChangeNotifier {
 
   // 保存角色到用户数据
   Future<void> _saveRoleToUser(UserRole role) async {
-    String roleString;
-    switch (role) {
-      case UserRole.consumer:
-        roleString = 'consumer';
-        break;
-      case UserRole.producer:
-        roleString = 'producer';
-        break;
-      case UserRole.both:
-        roleString = 'both';
-        break;
-    }
+    if (_isOfflineMode) return; // 离线模式下不保存
 
     try {
-      // 使用ParseService方法
+      String roleString;
+      switch (role) {
+        case UserRole.consumer:
+          roleString = 'consumer';
+          break;
+        case UserRole.producer:
+          roleString = 'producer';
+          break;
+        case UserRole.both:
+          roleString = 'both';
+          break;
+      }
+
+      // 尝试保存用户角色
       final success = await ParseService.setUserRoleDirect(roleString);
       if (!success) {
-        print('保存用户角色失败');
+        print('保存角色失败');
       }
     } catch (e) {
-      print('保存用户角色失败: $e');
+      print('保存角色异常: $e');
+      // 设置为离线模式，但不改变当前选择的角色
+      _isOfflineMode = true;
     }
   }
 }

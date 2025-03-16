@@ -49,7 +49,18 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('登录'), centerTitle: true),
+      appBar: AppBar(
+        title: const Text(
+          '登录',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 20,
+            color: Colors.white,
+          ),
+        ),
+        centerTitle: true,
+        backgroundColor: const Color(0xFF1976D2),
+      ),
       body: Consumer<UserModel>(
         builder: (context, userModel, child) {
           return SingleChildScrollView(

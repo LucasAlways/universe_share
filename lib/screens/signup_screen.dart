@@ -70,7 +70,18 @@ class _SignupScreenState extends State<SignupScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('注册'), centerTitle: true),
+      appBar: AppBar(
+        title: const Text(
+          '注册',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 20,
+            color: Colors.white,
+          ),
+        ),
+        centerTitle: true,
+        backgroundColor: const Color(0xFF1976D2),
+      ),
       body: Consumer<UserModel>(
         builder: (context, userModel, child) {
           return SingleChildScrollView(

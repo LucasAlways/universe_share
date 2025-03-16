@@ -64,40 +64,72 @@ class _HomeScreenState extends State<HomeScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        backgroundColor: const Color(0xFF1976D2), // 使用标准蓝色
         title: const Text(
-          '泰康', // 更新为泰康
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 24),
+          '泰康',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 22,
+            color: Colors.white, // 将字体颜色改为白色以保持一致性
+          ),
         ),
         centerTitle: true,
-        actions: [
-          // 显示模式切换按钮，只在第一个标签页时显示
-          if (_selectedIndex == 0)
-            Consumer<RoleModel>(
-              builder: (context, roleModel, child) {
-                // 如果当前不是选择模式界面，则显示模式切换按钮
-                if (roleModel.currentRole != UserRole.both) {
-                  return IconButton(
-                    icon: const Icon(Icons.swap_horiz),
-                    tooltip: '切换模式',
-                    onPressed: () {
-                      // 设置为both角色，显示选择界面
-                      roleModel.setUserRole(UserRole.both);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('已切换到模式选择'),
-                          duration: Duration(seconds: 2),
+        leading:
+            _selectedIndex == 0
+                ? Consumer<RoleModel>(
+                  builder: (context, roleModel, child) {
+                    // 如果当前不是选择模式界面，则显示模式切换按钮
+                    if (roleModel.currentRole != UserRole.both) {
+                      return Container(
+                        padding: const EdgeInsets.only(left: 4.0),
+                        alignment: Alignment.center,
+                        child: TextButton.icon(
+                          icon: const Icon(
+                            Icons.swap_horiz,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                          label: const Text(
+                            '切换',
+                            style: TextStyle(color: Colors.white, fontSize: 14),
+                          ),
+                          onPressed: () {
+                            // 显示确认对话框
+                            _showModeChangeConfirmation(context, roleModel);
+                          },
+                          style: TextButton.styleFrom(
+                            minimumSize: Size.zero,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 4,
+                            ),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
                         ),
                       );
-                    },
-                  );
-                }
-                return const SizedBox.shrink();
-              },
+                    }
+                    return const SizedBox.shrink();
+                  },
+                )
+                : null,
+        actions: [
+          Container(
+            padding: const EdgeInsets.only(right: 4.0),
+            alignment: Alignment.center,
+            child: TextButton.icon(
+              icon: const Icon(Icons.logout, color: Colors.white, size: 20),
+              label: const Text(
+                '退出',
+                style: TextStyle(color: Colors.white, fontSize: 14),
+              ),
+              onPressed: _logout,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
             ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: _logout,
-            tooltip: '退出登录',
           ),
         ],
       ),
@@ -163,5 +195,41 @@ class _HomeScreenState extends State<HomeScreen>
     } else {
       return const Center(child: Text('未知页面', style: TextStyle(fontSize: 24)));
     }
+  }
+
+  // 显示模式切换确认对话框
+  void _showModeChangeConfirmation(BuildContext context, RoleModel roleModel) {
+    String currentMode = roleModel.isConsumer ? '消费者模式' : '生产者模式';
+    showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('确认切换模式'),
+            content: Text('您确定要离开$currentMode，切换至其他模式吗？'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop(); // 关闭对话框
+                },
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop(); // 关闭对话框
+                  // 设置为both角色，显示选择界面
+                  roleModel.setUserRole(UserRole.both);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('已切换到模式选择'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+                style: TextButton.styleFrom(foregroundColor: Colors.blue),
+                child: const Text('确定'),
+              ),
+            ],
+          ),
+    );
   }
 }
