@@ -42,6 +42,7 @@ public class FloatingWindowService extends Service {
     private boolean isExpanded = false;
     private boolean isPartiallyHidden = false;
     private int screenWidth = 0;
+    private int screenHeight = 0; // 添加屏幕高度变量
     private static final int EDGE_WIDTH = 20; // 边缘露出的宽度
     private boolean isOnLeftSide = false;
 
@@ -77,8 +78,9 @@ public class FloatingWindowService extends Service {
         // 获取窗口管理器
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
 
-        // 获取屏幕宽度，用于计算边缘位置
+        // 获取屏幕尺寸，用于计算位置
         screenWidth = getResources().getDisplayMetrics().widthPixels;
+        screenHeight = getResources().getDisplayMetrics().heightPixels; // 获取屏幕高度
 
         // 初始化自动隐藏定时器
         autoHideHandler = new Handler(Looper.getMainLooper());
@@ -291,9 +293,10 @@ public class FloatingWindowService extends Service {
                     // 每次触摸都重置自动隐藏计时器
                     resetAutoHideTimer();
 
+                    // 判断是展开视图的点击还是拖动操作
                     switch (event.getAction()) {
                         case android.view.MotionEvent.ACTION_DOWN:
-                            // 记录初始位置
+                            // 记录初始触摸位置和悬浮窗位置
                             initialX[0] = params.x;
                             initialY[0] = params.y;
                             initialTouchX[0] = event.getRawX();
@@ -308,25 +311,32 @@ public class FloatingWindowService extends Service {
                                     buttonView.setAlpha(1.0f);
                                 }
                             }
-
                             return true;
 
                         case android.view.MotionEvent.ACTION_MOVE:
-                            // 直接使用手指位置，而不是计算偏移量
-                            float rawX = event.getRawX();
-                            float rawY = event.getRawY();
+                            // 计算偏移量 - 这种方式更准确地跟随手指
+                            float offsetX = event.getRawX() - initialTouchX[0];
+                            float offsetY = event.getRawY() - initialTouchY[0];
 
-                            // 计算新位置，考虑按钮大小，确保不会超出屏幕边界
-                            params.x = (int) (rawX - FLOATING_BUTTON_SIZE / 2);
-                            params.y = (int) (rawY - FLOATING_BUTTON_SIZE / 2);
+                            // 应用偏移量，更新悬浮窗位置
+                            params.x = (int) (initialX[0] + offsetX);
+                            params.y = (int) (initialY[0] + offsetY);
 
-                            // 限制X坐标范围
-                            params.x = Math.max(0, Math.min(params.x, screenWidth - FLOATING_BUTTON_SIZE));
+                            // 限制范围防止完全移出屏幕
+                            params.x = Math.max(-FLOATING_BUTTON_SIZE / 2,
+                                    Math.min(params.x, screenWidth - FLOATING_BUTTON_SIZE / 2));
+                            params.y = Math.max(-FLOATING_BUTTON_SIZE / 2,
+                                    Math.min(params.y, screenHeight - FLOATING_BUTTON_SIZE / 2));
 
-                            // 标记为移动状态
-                            if (Math.abs(rawX - initialTouchX[0]) > 10 ||
-                                    Math.abs(rawY - initialTouchY[0]) > 10) {
+                            // 如果移动距离超过阈值，标记为移动状态
+                            if (Math.abs(offsetX) > 10 || Math.abs(offsetY) > 10) {
                                 moving[0] = true;
+
+                                // 如果展开了视图，随着悬浮窗移动而更新展开视图位置
+                                if (isExpanded && expandedView != null) {
+                                    updateExpandedViewPosition(params);
+                                }
+
                                 // 如果是从边缘拖出，将其标记为非隐藏状态
                                 if (isPartiallyHidden) {
                                     isPartiallyHidden = false;
@@ -403,14 +413,14 @@ public class FloatingWindowService extends Service {
         backgroundView.setLayoutParams(bgParams);
         backgroundView.setBackgroundColor(COLOR_TRANSPARENT); // 完全透明
 
-        // 创建展开视图容器（卡片式设计）
+        // 创建展开视图容器（卡片式设计）- 缩小尺寸为原来的2/3
         LinearLayout cardContainer = new LinearLayout(this);
         cardContainer.setOrientation(LinearLayout.VERTICAL);
         cardContainer.setBackgroundColor(COLOR_WHITE);
 
         // 设置圆角背景
         GradientDrawable shape = new GradientDrawable();
-        shape.setCornerRadius(20);
+        shape.setCornerRadius(16); // 减小圆角
         shape.setColor(COLOR_WHITE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
             cardContainer.setBackground(shape);
@@ -418,11 +428,12 @@ public class FloatingWindowService extends Service {
             cardContainer.setBackgroundDrawable(shape);
         }
 
-        cardContainer.setPadding(32, 32, 32, 32);
+        // 减小内边距，使界面更紧凑
+        cardContainer.setPadding(16, 16, 16, 16); // 减小内边距
 
         // 设置阴影效果（仅21及以上支持）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            cardContainer.setElevation(10);
+            cardContainer.setElevation(8); // 减小阴影
         }
 
         // 修改卡片布局参数，根据悬浮窗位置动态调整
@@ -432,23 +443,31 @@ public class FloatingWindowService extends Service {
         cardParams.gravity = Gravity.CENTER_VERTICAL; // 移除 END gravity，改为动态计算位置
         cardContainer.setLayoutParams(cardParams);
 
-        // 添加标题
+        // 添加标题 - 减小字体和边距
         TextView titleText = new TextView(this);
         titleText.setText("二维码托管");
         titleText.setTextColor(COLOR_PRIMARY_DARK);
-        titleText.setTextSize(18);
-        titleText.setPadding(0, 0, 0, 24);
+        titleText.setTextSize(14); // 减小字体
+        titleText.setPadding(0, 0, 0, 8); // 减小下边距
         titleText.setGravity(Gravity.CENTER);
         cardContainer.addView(titleText);
 
-        // 添加"开始托管"按钮
+        // 添加"开始托管"按钮 - 进一步减小按钮
         Button startButton = new Button(this);
         startButton.setText("开始托管");
         startButton.setTextColor(COLOR_WHITE);
+        startButton.setTextSize(12); // 减小字体
+        // 设置按钮尺寸更小
+        LinearLayout.LayoutParams startBtnParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        startBtnParams.setMargins(0, 0, 0, 4); // 减小边距
+        startButton.setLayoutParams(startBtnParams);
+        startButton.setPadding(12, 6, 12, 6); // 减小内边距
 
         // 设置按钮圆角背景
         GradientDrawable btnShape = new GradientDrawable();
-        btnShape.setCornerRadius(30);
+        btnShape.setCornerRadius(20); // 减小圆角
         btnShape.setColor(COLOR_PRIMARY);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
             startButton.setBackground(btnShape);
@@ -458,20 +477,28 @@ public class FloatingWindowService extends Service {
 
         cardContainer.addView(startButton);
 
-        // 添加间距
+        // 添加间距 - 减小间距
         View spacer = new View(this);
         spacer.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 16));
+                LinearLayout.LayoutParams.MATCH_PARENT, 8)); // 减小间距
         cardContainer.addView(spacer);
 
         // 添加"结束托管"按钮
         Button stopButton = new Button(this);
         stopButton.setText("结束托管");
         stopButton.setTextColor(COLOR_WHITE);
+        stopButton.setTextSize(14); // 减小字体
+        // 设置按钮尺寸更小
+        LinearLayout.LayoutParams stopBtnParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        stopBtnParams.setMargins(0, 0, 0, 0);
+        stopButton.setLayoutParams(stopBtnParams);
+        stopButton.setPadding(16, 8, 16, 8); // 减小内边距
 
         // 设置按钮圆角背景
         GradientDrawable stopBtnShape = new GradientDrawable();
-        stopBtnShape.setCornerRadius(30);
+        stopBtnShape.setCornerRadius(20); // 减小圆角
         stopBtnShape.setColor(0xFFF44336); // 红色
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
             stopButton.setBackground(stopBtnShape);
@@ -563,23 +590,16 @@ public class FloatingWindowService extends Service {
                     expandedParams.gravity = Gravity.CENTER;
                     windowManager.addView(expandedView, expandedParams);
 
-                    // 获取卡片容器
+                    // 获取卡片容器并设置位置
                     LinearLayout cardContainer = (LinearLayout) ((FrameLayout) expandedView).getChildAt(0);
                     if (cardContainer != null) {
-                        // 计算卡片位置
                         FrameLayout.LayoutParams cardParams = (FrameLayout.LayoutParams) cardContainer
                                 .getLayoutParams();
 
-                        // 根据悬浮窗位置决定卡片显示在左侧还是右侧
-                        if (params.x < screenWidth / 2) {
-                            // 悬浮窗在左侧，卡片显示在右侧
-                            cardParams.gravity = Gravity.CENTER_VERTICAL | Gravity.END;
-                            cardParams.rightMargin = screenWidth - params.x - FLOATING_BUTTON_SIZE - 20;
-                        } else {
-                            // 悬浮窗在右侧，卡片显示在左侧
-                            cardParams.gravity = Gravity.CENTER_VERTICAL | Gravity.START;
-                            cardParams.leftMargin = params.x - 20;
-                        }
+                        // 计算位置
+                        calculateExpandedViewPosition(params, cardParams);
+
+                        // 应用布局参数
                         cardContainer.setLayoutParams(cardParams);
                     }
 
@@ -595,19 +615,106 @@ public class FloatingWindowService extends Service {
         }
     }
 
-    // 吸附到屏幕边缘，这里只保留在右侧
+    // 更新展开视图位置的方法
+    private void updateExpandedViewPosition(WindowManager.LayoutParams floatingParams) {
+        try {
+            if (expandedView != null) {
+                LinearLayout cardContainer = (LinearLayout) ((FrameLayout) expandedView).getChildAt(0);
+                if (cardContainer != null) {
+                    FrameLayout.LayoutParams cardParams = (FrameLayout.LayoutParams) cardContainer.getLayoutParams();
+
+                    // 计算位置 - 基于浮动窗口的当前位置
+                    calculateExpandedViewPosition(floatingParams, cardParams);
+
+                    // 应用布局参数
+                    cardContainer.setLayoutParams(cardParams);
+                }
+            }
+        } catch (Exception e) {
+            Log.e("FloatingWindowService", "更新展开视图位置失败: " + e.getMessage(), e);
+        }
+    }
+
+    // 计算展开视图的最佳位置 - 修改为智能上下显示
+    private void calculateExpandedViewPosition(WindowManager.LayoutParams floatingParams,
+            FrameLayout.LayoutParams cardParams) {
+        // 获取悬浮窗的中心点位置
+        int floatingCenterX = floatingParams.x + FLOATING_BUTTON_SIZE / 2;
+        int floatingCenterY = floatingParams.y + FLOATING_BUTTON_SIZE / 2;
+
+        // 清除所有边距
+        cardParams.leftMargin = 0;
+        cardParams.rightMargin = 0;
+        cardParams.topMargin = 0;
+        cardParams.bottomMargin = 0;
+
+        // 计算水平位置
+        boolean isLeftSide = floatingCenterX < screenWidth / 2;
+
+        // 判断悬浮窗是否在屏幕上半部分
+        boolean isTopHalf = floatingCenterY < screenHeight / 2;
+
+        // 设置重力属性
+        int verticalGravity, horizontalGravity;
+
+        // 水平位置
+        horizontalGravity = isLeftSide ? Gravity.START : Gravity.END;
+
+        // 垂直位置 - 根据悬浮窗在屏幕上下位置决定二维码界面显示在上方还是下方
+        // 如果悬浮窗在上半部分，二维码界面显示在下方；如果在下半部分，显示在上方
+        verticalGravity = isTopHalf ? Gravity.TOP : Gravity.BOTTOM;
+
+        cardParams.gravity = verticalGravity | horizontalGravity;
+
+        // 安全间距，靠近悬浮窗但不覆盖
+        int safeDistance = 5; // 减小间距使其更紧贴悬浮窗
+
+        // 水平方向位置计算
+        if (isLeftSide) {
+            // 悬浮窗在左侧，二维码界面显示在右侧
+            cardParams.leftMargin = floatingParams.x + FLOATING_BUTTON_SIZE + safeDistance;
+        } else {
+            // 悬浮窗在右侧，二维码界面显示在左侧
+            cardParams.rightMargin = screenWidth - floatingParams.x + safeDistance;
+        }
+
+        // 垂直方向位置计算
+        if (isTopHalf) {
+            // 悬浮窗在上半部分，二维码界面显示在下方
+            cardParams.topMargin = floatingParams.y + FLOATING_BUTTON_SIZE + safeDistance;
+        } else {
+            // 悬浮窗在下半部分，二维码界面显示在上方
+            cardParams.bottomMargin = screenHeight - floatingParams.y + safeDistance;
+        }
+
+        Log.d("FloatingWindowService", "展开视图位置计算: " +
+                "isLeftSide=" + isLeftSide + ", isTopHalf=" + isTopHalf +
+                ", leftMargin=" + cardParams.leftMargin +
+                ", rightMargin=" + cardParams.rightMargin +
+                ", topMargin=" + cardParams.topMargin +
+                ", bottomMargin=" + cardParams.bottomMargin);
+    }
+
+    // 吸附到屏幕边缘 - 修改为靠近最近的边缘
     private void snapToEdge(WindowManager.LayoutParams params) {
-        // 只吸附到右边缘
-        animateViewToEdge(params, false);
+        int screenCenter = screenWidth / 2;
+        boolean isCloserToLeft = params.x < screenCenter;
+
+        // 根据当前位置决定靠近哪个边缘
+        animateViewToEdge(params, isCloserToLeft);
+
+        // 记录当前靠哪边
+        isOnLeftSide = isCloserToLeft;
+
+        Log.d("FloatingWindowService", "悬浮窗自动靠近" + (isCloserToLeft ? "左" : "右") + "边缘");
     }
 
     // 将悬浮窗动画移动到边缘
     private void animateViewToEdge(final WindowManager.LayoutParams params, final boolean isLeft) {
         final int targetX;
-        // 强制使用右侧
         if (isLeft) {
-            // 设置为负值，使大部分区域隐藏在左边缘外 - 但我们只使用右侧
-            targetX = -params.width + EDGE_WIDTH;
+            // 设置为负值，使大部分区域隐藏在左边缘外
+            targetX = -FLOATING_BUTTON_SIZE + EDGE_WIDTH;
         } else {
             // 设置为屏幕宽度减去悬浮窗的露出部分宽度
             targetX = screenWidth - EDGE_WIDTH;
