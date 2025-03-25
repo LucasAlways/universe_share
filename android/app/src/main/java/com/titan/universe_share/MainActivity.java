@@ -1,4 +1,4 @@
-package com.example.universe_share;
+package com.titan.universe_share;
 
 import android.content.Intent;
 import android.net.Uri;
@@ -16,21 +16,14 @@ import io.flutter.embedding.engine.FlutterEngine;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugins.GeneratedPluginRegistrant;
 
-import com.universe_share.floating_window.FloatingWindowPlugin;
-
 public class MainActivity extends FlutterActivity {
     private static final String CHANNEL = "com.universe_share/floating_window";
     private static final int REQUEST_CODE_OVERLAY_PERMISSION = 1234;
     private MethodChannel.Result pendingResult;
-    private FloatingWindowPlugin floatingWindowPlugin;
 
     @Override
     public void configureFlutterEngine(@NonNull FlutterEngine flutterEngine) {
         super.configureFlutterEngine(flutterEngine);
-
-        // 注册我们的插件
-        floatingWindowPlugin = new FloatingWindowPlugin();
-        flutterEngine.getPlugins().add(floatingWindowPlugin);
 
         // 设置方法通道
         new MethodChannel(flutterEngine.getDartExecutor().getBinaryMessenger(), CHANNEL)

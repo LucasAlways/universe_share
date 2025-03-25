@@ -1,4 +1,4 @@
-package com.example.universe_share;
+package com.titan.universe_share;
 
 import android.app.Notification;
 import android.app.NotificationChannel;

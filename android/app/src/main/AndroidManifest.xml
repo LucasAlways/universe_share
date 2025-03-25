@@ -31,7 +31,7 @@
         </activity>
         <!-- 悬浮窗服务 -->
         <service 
-            android:name="com.example.universe_share.FloatingWindowService"
+            android:name="com.titan.universe_share.FloatingWindowService"
             android:enabled="true"
             android:exported="false"
             android:process=":floating_window"
