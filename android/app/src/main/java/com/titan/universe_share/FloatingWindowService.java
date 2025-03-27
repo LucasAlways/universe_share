@@ -34,8 +34,37 @@ import android.view.animation.TranslateAnimation;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
 import android.os.Looper;
+import android.graphics.Bitmap;
+import android.hardware.display.DisplayManager;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.ImageReader;
+import android.media.Image;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.graphics.Point;
+import android.view.Display;
+import android.util.DisplayMetrics;
+import android.app.AlertDialog;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import com.titan.universe_share.utils.PaymentTemplateManager;
+import android.graphics.BitmapFactory;
+import com.titan.universe_share.utils.ImageSimilarityUtils;
+import android.os.HandlerThread;
+import android.app.Activity;
+import android.os.Vibrator;
+import java.nio.ByteBuffer;
 
 public class FloatingWindowService extends Service {
+    private static final String TAG = "FloatingWindowService";
     private WindowManager windowManager;
     private View floatingView;
     private View expandedView;
@@ -71,14 +100,46 @@ public class FloatingWindowService extends Service {
     // 悬浮窗大小
     private static final int FLOATING_BUTTON_SIZE = 160;
 
+    private View cancelHostingView;
+    private boolean isHosting = false;
+    private Handler hostingHandler;
+    private static final long SCREENSHOT_INTERVAL = 1000; // 每秒检查一次
+    private PaymentTemplateManager templateManager; // 替换templateBitmap
+    private long lastQrCodeExpiryTime = 0;
+    private String lastQrCodeContent = "";
+    private String lastCardNumber = "";
+    private String lastBalance = "";
+
+    // 屏幕截图相关成员变量
+    private MediaProjection mediaProjection;
+    private VirtualDisplay virtualDisplay;
+    private ImageReader imageReader;
+    private int screenDensity;
+    private int screenHeight;
+    private Handler screenshotHandler;
+    private static final String SCREENSHOT_THREAD_NAME = "screenshot-thread";
+    private Intent resultData; // 保存MediaProjection权限结果
+    private long lastLogTime = 0; // 上次记录日志的时间
+    private boolean mediaProjectionInitialized = false; // 标记MediaProjection是否已初始化
+    private Bitmap lastScreenshot = null; // 最后一次截图
+    private Runnable screenshotRunnable; // 持有截图任务的引用
+    private static final long HOSTING_INTERVAL = 1000; // 托管任务间隔
+
     @Override
     public void onCreate() {
         super.onCreate();
+
+        // 注册服务实例
+        FloatingWindowServiceHolder.setService(this);
+
         // 获取窗口管理器
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
 
         // 获取屏幕宽度，用于计算边缘位置
         screenWidth = getResources().getDisplayMetrics().widthPixels;
+
+        // 初始化模板管理器
+        templateManager = new PaymentTemplateManager(this);
 
         // 初始化自动隐藏定时器
         autoHideHandler = new Handler(Looper.getMainLooper());
@@ -131,19 +192,27 @@ public class FloatingWindowService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Log.d("FloatingWindowService", "onStartCommand调用");
+        super.onStartCommand(intent, flags, startId);
 
-        // 立即显示悬浮窗，不等待系统回调
-        if (floatingView == null) {
-            try {
-                showFloatingWindow();
-                Log.d("FloatingWindowService", "在onStartCommand中显示悬浮窗");
-            } catch (Exception e) {
-                Log.e("FloatingWindowService", "显示悬浮窗时出错", e);
+        // 创建通知渠道
+        createNotificationChannel();
+
+        // 立即启动前台服务
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            int serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                serviceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
             }
+            startForeground(NOTIFICATION_ID, createNotification(), serviceType);
         } else {
-            Log.d("FloatingWindowService", "悬浮窗已存在，不需要再次创建");
+            startForeground(NOTIFICATION_ID, createNotification());
         }
+
+        // 显示悬浮窗
+        showFloatingWindow();
+
+        // 启动保持服务存活的定时器
+        keepAliveHandler.postDelayed(keepAliveRunnable, KEEP_ALIVE_INTERVAL);
 
         return START_STICKY;
     }
@@ -509,9 +578,9 @@ public class FloatingWindowService extends Service {
         startButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                // 开始托管操作
-                Toast.makeText(FloatingWindowService.this,
-                        "开始托管", Toast.LENGTH_SHORT).show();
+                // 显示确认对话框
+                showConfirmStartHostingDialog(params);
+
                 // 重置自动隐藏计时器
                 resetAutoHideTimer();
             }
@@ -538,6 +607,49 @@ public class FloatingWindowService extends Service {
                 }, 1000);
             }
         });
+    }
+
+    // 添加显示确认对话框的方法
+    private void showConfirmStartHostingDialog(final WindowManager.LayoutParams params) {
+        try {
+            // 使用系统对话框样式
+            AlertDialog.Builder builder;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                builder = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert);
+            } else {
+                builder = new AlertDialog.Builder(this);
+            }
+
+            builder.setTitle("确认启动托管")
+                    .setMessage("请确保当前界面为正确的二维码展示界面，否则无法正常启动服务！")
+                    .setIcon(android.R.drawable.ic_dialog_info)
+                    .setPositiveButton("是", (dialog, which) -> {
+                        dialog.dismiss();
+                        // 关闭展开视图
+                        toggleExpandedView(params);
+                        // 开始托管操作
+                        Toast.makeText(FloatingWindowService.this, "开始托管", Toast.LENGTH_SHORT).show();
+                        // 调用startHosting方法开始实际托管
+                        Log.d(TAG, "*********开始---托管*********");
+                        startHosting();
+                    })
+                    .setNegativeButton("关闭", (dialog, which) -> {
+                        dialog.dismiss();
+                        // 不做任何操作，保持悬浮窗状态
+                        Toast.makeText(FloatingWindowService.this, "已取消托管", Toast.LENGTH_SHORT).show();
+                    })
+                    .setCancelable(false); // 强制用户选择一个选项
+
+            AlertDialog dialog = builder.create();
+            // 设置对话框显示层级，确保它显示在其他窗口之上
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setType(getWindowLayoutType());
+            }
+            dialog.show();
+        } catch (Exception e) {
+            Log.e(TAG, "显示确认对话框时出错", e);
+            Toast.makeText(this, "无法显示确认对话框", Toast.LENGTH_SHORT).show();
+        }
     }
 
     // 切换展开/收起托管界面
@@ -597,12 +709,42 @@ public class FloatingWindowService extends Service {
 
     // 吸附到屏幕边缘，这里只保留在右侧
     private void snapToEdge(WindowManager.LayoutParams params) {
+        // 先检查视图是否已经被移除
+        if (floatingView == null || !isViewAttached(floatingView)) {
+            Log.e(TAG, "悬浮窗已被移除，无法吸附到边缘");
+            return;
+        }
+
         // 只吸附到右边缘
         animateViewToEdge(params, false);
     }
 
+    // 检查视图是否附加到窗口管理器
+    private boolean isViewAttached(View view) {
+        if (view == null)
+            return false;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            return view.isAttachedToWindow();
+        } else {
+            // 对于API 19以下，没有可靠的方法检查，只能尝试更新布局
+            try {
+                windowManager.updateViewLayout(view, view.getLayoutParams());
+                return true;
+            } catch (IllegalArgumentException e) {
+                return false;
+            }
+        }
+    }
+
     // 将悬浮窗动画移动到边缘
     private void animateViewToEdge(final WindowManager.LayoutParams params, final boolean isLeft) {
+        // 先检查视图是否已经被移除
+        if (floatingView == null || !isViewAttached(floatingView)) {
+            Log.e(TAG, "悬浮窗已被移除，无法执行动画");
+            return;
+        }
+
         final int targetX;
         // 强制使用右侧
         if (isLeft) {
@@ -631,27 +773,36 @@ public class FloatingWindowService extends Service {
             animationSteps[i] = new Runnable() {
                 @Override
                 public void run() {
+                    // 检查视图是否还在窗口中
+                    if (floatingView == null || !isViewAttached(floatingView)) {
+                        // 如果视图已被移除，终止动画
+                        Log.e(TAG, "动画过程中悬浮窗已被移除，终止动画");
+                        return;
+                    }
+
                     float progress = (float) (step + 1) / STEPS;
                     params.x = startX + (int) (distance * progress);
 
-                    if (windowManager != null && floatingView != null) {
+                    try {
                         windowManager.updateViewLayout(floatingView, params);
-                    }
 
-                    if (step < STEPS - 1) {
-                        handler.postDelayed(animationSteps[step + 1], STEP_DURATION);
-                    } else {
-                        // 动画结束，标记为部分隐藏状态
-                        isPartiallyHidden = true;
-                        isOnLeftSide = isLeft;
+                        if (step < STEPS - 1) {
+                            handler.postDelayed(animationSteps[step + 1], STEP_DURATION);
+                        } else {
+                            // 动画结束，标记为部分隐藏状态
+                            isPartiallyHidden = true;
+                            isOnLeftSide = isLeft;
 
-                        // 设置边缘部分半透明，但可见
-                        View buttonView = ((FrameLayout) floatingView).getChildAt(0);
-                        if (buttonView != null) {
-                            buttonView.setAlpha(0.7f);
+                            // 设置边缘部分半透明，但可见
+                            View buttonView = ((FrameLayout) floatingView).getChildAt(0);
+                            if (buttonView != null) {
+                                buttonView.setAlpha(0.7f);
+                            }
+
+                            Log.d("FloatingWindowService", "悬浮窗已隐藏到边缘，isLeft=" + isLeft);
                         }
-
-                        Log.d("FloatingWindowService", "悬浮窗已隐藏到边缘，isLeft=" + isLeft);
+                    } catch (Exception e) {
+                        Log.e(TAG, "更新悬浮窗布局时出错", e);
                     }
                 }
             };
@@ -663,6 +814,12 @@ public class FloatingWindowService extends Service {
 
     // 将隐藏的悬浮窗动画移回可见区域
     private void animateViewToVisible(final WindowManager.LayoutParams params) {
+        // 先检查视图是否已经被移除
+        if (floatingView == null || !isViewAttached(floatingView)) {
+            Log.e(TAG, "悬浮窗已被移除，无法执行动画");
+            return;
+        }
+
         final int targetX;
         if (isOnLeftSide) {
             targetX = 0; // 左侧显示时X为0
@@ -687,29 +844,38 @@ public class FloatingWindowService extends Service {
             animationSteps[i] = new Runnable() {
                 @Override
                 public void run() {
+                    // 检查视图是否还在窗口中
+                    if (floatingView == null || !isViewAttached(floatingView)) {
+                        // 如果视图已被移除，终止动画
+                        Log.e(TAG, "动画过程中悬浮窗已被移除，终止动画");
+                        return;
+                    }
+
                     float progress = (float) (step + 1) / STEPS;
                     params.x = startX + (int) (distance * progress);
 
-                    if (windowManager != null && floatingView != null) {
+                    try {
                         windowManager.updateViewLayout(floatingView, params);
-                    }
 
-                    if (step < STEPS - 1) {
-                        handler.postDelayed(animationSteps[step + 1], STEP_DURATION);
-                    } else {
-                        // 动画结束，标记为完全可见状态
-                        isPartiallyHidden = false;
+                        if (step < STEPS - 1) {
+                            handler.postDelayed(animationSteps[step + 1], STEP_DURATION);
+                        } else {
+                            // 动画结束，标记为完全可见状态
+                            isPartiallyHidden = false;
 
-                        // 恢复完全不透明
-                        View buttonView = ((FrameLayout) floatingView).getChildAt(0);
-                        if (buttonView != null) {
-                            buttonView.setAlpha(1.0f);
+                            // 恢复完全不透明
+                            View buttonView = ((FrameLayout) floatingView).getChildAt(0);
+                            if (buttonView != null) {
+                                buttonView.setAlpha(1.0f);
+                            }
+
+                            // 重置自动隐藏计时器
+                            resetAutoHideTimer();
+
+                            Log.d("FloatingWindowService", "悬浮窗已恢复显示");
                         }
-
-                        // 重置自动隐藏计时器
-                        resetAutoHideTimer();
-
-                        Log.d("FloatingWindowService", "悬浮窗已恢复显示");
+                    } catch (Exception e) {
+                        Log.e(TAG, "更新悬浮窗布局时出错", e);
                     }
                 }
             };
@@ -731,47 +897,670 @@ public class FloatingWindowService extends Service {
     public void onDestroy() {
         super.onDestroy();
 
-        // 取消所有计时器
-        cancelAutoHideTimer();
-        if (keepAliveHandler != null && keepAliveRunnable != null) {
-            keepAliveHandler.removeCallbacks(keepAliveRunnable);
+        // 清除服务实例
+        FloatingWindowServiceHolder.setService(null);
+
+        // 释放媒体投影资源
+        releaseMediaProjection();
+
+        // 停止托管
+        stopHosting();
+
+        // 移除悬浮窗
+        if (floatingView != null && floatingView.isShown()) {
+            windowManager.removeView(floatingView);
+            floatingView = null;
         }
 
-        // 清理视图
+        // 移除展开视图
+        if (expandedView != null && expandedView.isShown()) {
+            windowManager.removeView(expandedView);
+            expandedView = null;
+        }
+
+        // 释放模板管理器资源
+        if (templateManager != null) {
+            templateManager.release();
+        }
+
+        // 移除定时器任务
+        if (autoHideHandler != null) {
+            autoHideHandler.removeCallbacksAndMessages(null);
+        }
+
+        if (keepAliveHandler != null) {
+            keepAliveHandler.removeCallbacksAndMessages(null);
+        }
+
+        if (hostingHandler != null) {
+            hostingHandler.removeCallbacksAndMessages(null);
+        }
+
+        Log.d(TAG, "服务已销毁");
+    }
+
+    // 处理截图，分析支付信息
+    private void processScreenshot(Bitmap screenshot) {
+        if (screenshot == null) {
+            Log.e(TAG, "截图为空");
+            return;
+        }
+
+        // 检查是否是支付界面
+        long startTime = System.currentTimeMillis();
+        boolean isPaymentScreen = templateManager.isPaymentScreen(screenshot);
+        Log.d(TAG, "支付界面检测耗时: " + (System.currentTimeMillis() - startTime) + "ms, 结果: " + isPaymentScreen);
+
+        if (!isPaymentScreen) {
+            Log.e(TAG, "当前不是支付界面");
+            showInvalidInterfaceDialog();
+            return;
+        }
+
+        // 识别二维码内容
+        startTime = System.currentTimeMillis();
+        String qrContent = recognizeQrCode(screenshot);
+        Log.d(TAG, "二维码识别耗时: " + (System.currentTimeMillis() - startTime) + "ms");
+
+        // 提取付款信息
+        startTime = System.currentTimeMillis();
+        String[] paymentInfo = templateManager.extractPaymentInfo(screenshot);
+        Log.d(TAG, "付款信息提取耗时: " + (System.currentTimeMillis() - startTime) + "ms");
+
+        if (paymentInfo == null || paymentInfo.length < 3) {
+            Log.e(TAG, "提取支付信息失败");
+            return;
+        }
+
+        // 根据utils包中的PaymentTemplateManager调整索引顺序
+        String timeText = paymentInfo[0]; // 时间在第一个位置
+        String cardNumber = paymentInfo[1]; // 卡号在第二个位置
+        String balance = paymentInfo[2]; // 余额在第三个位置
+
+        Log.d(TAG, "提取信息 - 时间: " + timeText + ", 卡号: " + cardNumber + ", 余额: " + balance);
+
+        // 检查是否需要通知（新二维码或即将过期）
+        boolean isNewQrCode = !qrContent.isEmpty() && !qrContent.equals(lastQrCodeContent);
+        boolean isInfoChanged = !cardNumber.equals(lastCardNumber) || !balance.equals(lastBalance);
+        boolean isExpiring = templateManager.isQrCodeExpiring(timeText);
+
+        Log.d(TAG, "状态 - 新二维码: " + isNewQrCode + ", 信息变化: " + isInfoChanged + ", 即将过期: " + isExpiring);
+
+        // 如果识别到新信息或信息变化，更新存储的数据
+        if (isNewQrCode || isInfoChanged || isExpiring) {
+            // 更新信息
+            if (!qrContent.isEmpty()) {
+                lastQrCodeContent = qrContent;
+            }
+            lastCardNumber = cardNumber;
+            lastBalance = balance;
+            lastQrCodeExpiryTime = parseExpiryTime(timeText);
+
+            // 记录信息
+            Log.i(TAG, "---------- 支付信息更新 ----------");
+            if (!qrContent.isEmpty()) {
+                Log.i(TAG, String.format("二维码内容: %s", qrContent));
+            }
+            Log.i(TAG, String.format("卡号: %s", cardNumber));
+            Log.i(TAG, String.format("余额: %s", balance));
+            Log.i(TAG, String.format("剩余时间: %s", timeText));
+
+            // 通知UI更新（可以通过Toast显示）
+            new Handler(Looper.getMainLooper()).post(() -> {
+                Toast.makeText(this, "已识别到支付码信息: " + cardNumber + " / " + balance, Toast.LENGTH_SHORT).show();
+            });
+
+            // 如果即将过期，增加警告日志
+            if (isExpiring) {
+                Log.w(TAG, "⚠️ 二维码即将过期，请注意更新!");
+                // 可以在这里添加发送通知或振动提醒的代码
+                showExpiringNotification();
+            }
+        } else {
+            // 如果信息没有变化，减少日志输出
+            Log.d(TAG, "支付信息未变化，继续监控中...");
+        }
+    }
+
+    // 显示二维码即将过期通知
+    private void showExpiringNotification() {
         try {
-            if (floatingView != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                    if (floatingView.isAttachedToWindow()) {
-                        windowManager.removeView(floatingView);
-                    }
+            // 在主线程上运行
+            new Handler(Looper.getMainLooper()).post(() -> {
+                // 显示Toast提醒
+                Toast.makeText(this, "⚠️ 二维码即将过期，请注意更新!", Toast.LENGTH_LONG).show();
+
+                // 可以增加振动提醒
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    ((Vibrator) getSystemService(VIBRATOR_SERVICE)).vibrate(
+                            android.os.VibrationEffect.createOneShot(500,
+                                    android.os.VibrationEffect.DEFAULT_AMPLITUDE));
                 } else {
-                    // 在旧版本上尝试移除，忽略可能的异常
-                    try {
-                        windowManager.removeView(floatingView);
-                    } catch (Exception e) {
-                        // 忽略
+                    ((Vibrator) getSystemService(VIBRATOR_SERVICE)).vibrate(500);
+                }
+            });
+        } catch (Exception e) {
+            Log.e(TAG, "显示过期通知失败: " + e.getMessage());
+        }
+    }
+
+    // 开始二维码托管
+    private void startHosting() {
+        if (isHosting) {
+            Log.d(TAG, "托管已在进行中，不重复启动");
+            return;
+        }
+
+        isHosting = true;
+
+        // 清除之前的信息记录
+        lastQrCodeContent = null;
+        lastCardNumber = null;
+        lastBalance = null;
+        lastQrCodeExpiryTime = 0;
+
+        Log.i(TAG, "开始托管支付码...");
+
+        // 初始化Handler用于定期任务
+        if (hostingHandler == null) {
+            hostingHandler = new Handler(Looper.getMainLooper());
+        }
+
+        // 创建一个Runnable用于截图任务
+        screenshotRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isHosting) {
+                    Log.d(TAG, "托管已停止，取消截图任务");
+                    return;
+                }
+
+                try {
+                    // 捕获屏幕
+                    Bitmap screenshot = takeScreenshot();
+
+                    if (screenshot != null) {
+                        // 记录截图尺寸
+                        Log.d(TAG, "截图尺寸: " + screenshot.getWidth() + "x" + screenshot.getHeight());
+
+                        // 处理截图
+                        processScreenshot(screenshot);
+
+                        // 回收位图避免内存泄漏
+                        screenshot.recycle();
+                    } else {
+                        Log.w(TAG, "截图捕获失败");
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "截图任务执行错误: " + e.getMessage(), e);
+                } finally {
+                    // 继续下一次截图，无论成功与否
+                    if (isHosting && hostingHandler != null) {
+                        hostingHandler.postDelayed(this, HOSTING_INTERVAL);
                     }
                 }
-                floatingView = null;
+            }
+        };
+
+        // 立即开始第一次截图任务
+        if (hostingHandler != null) {
+            hostingHandler.post(screenshotRunnable);
+        }
+
+        // 隐藏悬浮窗
+        if (floatingView != null && floatingView.isShown()) {
+            try {
+                windowManager.removeView(floatingView);
+            } catch (Exception e) {
+                Log.e(TAG, "移除悬浮窗失败: " + e.getMessage());
+            }
+        }
+
+        // 显示取消托管按钮
+        showCancelHostingButton();
+
+        Toast.makeText(this, "已开始托管支付码", Toast.LENGTH_SHORT).show();
+    }
+
+    // 显示取消托管按钮
+    private void showCancelHostingButton() {
+        LayoutInflater inflater = (LayoutInflater) getSystemService(LAYOUT_INFLATER_SERVICE);
+        cancelHostingView = inflater.inflate(R.layout.cancel_hosting_button, null);
+
+        Button btnCancelHosting = cancelHostingView.findViewById(R.id.btnCancelHosting);
+        btnCancelHosting.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopHosting();
+            }
+        });
+
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                getWindowLayoutType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.BOTTOM;
+
+        try {
+            windowManager.addView(cancelHostingView, params);
+        } catch (Exception e) {
+            Log.e(TAG, "添加取消托管按钮时出错", e);
+        }
+    }
+
+    // 截取屏幕
+    public Bitmap takeScreenshot() {
+        // 一些设备上可能需要额外权限或实现
+        // 应该使用MediaProjection API进行屏幕截图
+        try {
+            // 如果已初始化MediaProjection，尝试捕获实际屏幕
+            if (mediaProjectionInitialized && lastScreenshot != null) {
+                // 返回深拷贝以避免并发修改
+                Bitmap screenshot = lastScreenshot.copy(lastScreenshot.getConfig(), true);
+                Log.d(TAG, "成功捕获屏幕截图: " + screenshot.getWidth() + "x" + screenshot.getHeight());
+                return screenshot;
+            } else {
+                // 如果10秒内没有日志，则记录这个消息
+                long currentTime = System.currentTimeMillis();
+                if (currentTime - lastLogTime > 10000) {
+                    if (!mediaProjectionInitialized) {
+                        Log.w(TAG, "MediaProjection未初始化，无法截屏，将使用模板图像");
+                    } else {
+                        Log.w(TAG, "截图未准备好，将使用模板图像");
+                    }
+                    lastLogTime = currentTime;
+
+                    // 请求截屏权限
+                    requestScreenCapturePermission();
+                }
             }
 
-            if (expandedView != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                    if (expandedView.isAttachedToWindow()) {
-                        windowManager.removeView(expandedView);
-                    }
-                } else {
-                    // 在旧版本上尝试移除，忽略可能的异常
-                    try {
-                        windowManager.removeView(expandedView);
-                    } catch (Exception e) {
-                        // 忽略
-                    }
+            // 如果无法获取实际截图，则使用模板图像进行测试
+            if (templateManager != null) {
+                Bitmap template = templateManager.getTemplate(PaymentTemplateManager.TEMPLATE_PAYMENT);
+                if (template != null) {
+                    // 返回深拷贝以避免并发修改
+                    return template.copy(template.getConfig(), true);
                 }
-                expandedView = null;
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            Log.e(TAG, "截屏时发生错误: " + e.getMessage(), e);
         }
+
+        return null;
+    }
+
+    // 请求屏幕捕获权限
+    private void requestScreenCapturePermission() {
+        Log.d(TAG, "需要请求屏幕捕获权限，请在MainActivity中启动权限请求");
+        // 通知MainActivity请求权限
+        Intent intent = new Intent("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION");
+        sendBroadcast(intent);
+    }
+
+    // 释放屏幕捕获资源
+    private void releaseMediaProjection() {
+        try {
+            Log.d(TAG, "正在释放MediaProjection资源");
+            if (virtualDisplay != null) {
+                virtualDisplay.release();
+                virtualDisplay = null;
+            }
+            if (imageReader != null) {
+                imageReader.close();
+                imageReader = null;
+            }
+            if (mediaProjection != null) {
+                mediaProjection.stop();
+                mediaProjection = null;
+            }
+            if (screenshotHandler != null && screenshotHandler.getLooper() != null) {
+                screenshotHandler.getLooper().quit();
+                screenshotHandler = null;
+            }
+            if (lastScreenshot != null) {
+                lastScreenshot.recycle();
+                lastScreenshot = null;
+            }
+            mediaProjectionInitialized = false;
+            Log.d(TAG, "MediaProjection资源已释放");
+        } catch (Exception e) {
+            Log.e(TAG, "释放MediaProjection资源时出错: " + e.getMessage(), e);
+        }
+    }
+
+    // 显示无效界面对话框
+    private void showInvalidInterfaceDialog() {
+        // 确保在主线程运行
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                // 使用系统提醒对话框样式
+                AlertDialog.Builder builder;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    builder = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert);
+                } else {
+                    builder = new AlertDialog.Builder(this);
+                }
+
+                builder.setTitle("无效的支付界面")
+                        .setMessage("当前不是有效的支付码界面，请确保您处于支付宝支付码显示页面")
+                        .setIcon(android.R.drawable.ic_dialog_alert)
+                        .setPositiveButton("确定", (dialog, which) -> {
+                            dialog.dismiss();
+                            // 停止托管，因为当前不是有效界面
+                            stopHosting();
+                        })
+                        .setCancelable(false); // 强制用户确认
+
+                AlertDialog dialog = builder.create();
+                // 设置对话框显示层级，确保它显示在其他窗口之上
+                if (dialog.getWindow() != null) {
+                    dialog.getWindow().setType(getWindowLayoutType());
+                }
+                dialog.show();
+
+                // 显示Toast提醒，以防对话框未显示
+                Toast.makeText(this, "当前不是有效的支付码界面", Toast.LENGTH_LONG).show();
+
+                // 在3秒后自动关闭对话框（防止用户无响应）
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (dialog.isShowing()) {
+                        dialog.dismiss();
+                        // 停止托管，因为当前不是有效界面
+                        stopHosting();
+                    }
+                }, 3000);
+            } catch (Exception e) {
+                Log.e(TAG, "显示无效界面对话框时出错", e);
+                // 如果对话框显示失败，确保通过Toast通知用户
+                Toast.makeText(this, "当前不是有效的支付码界面，托管已停止", Toast.LENGTH_LONG).show();
+                // 直接停止托管
+                stopHosting();
+            }
+        });
+    }
+
+    // 识别二维码内容
+    private String recognizeQrCode(Bitmap screenshot) {
+        try {
+            // 使用ML Kit的条码扫描功能
+            com.google.mlkit.vision.barcode.BarcodeScanner scanner = com.google.mlkit.vision.barcode.BarcodeScanning
+                    .getClient(new com.google.mlkit.vision.barcode.BarcodeScannerOptions.Builder()
+                            .setBarcodeFormats(com.google.mlkit.vision.barcode.common.Barcode.FORMAT_QR_CODE)
+                            .build());
+
+            // 原始图像可能太大，裁剪二维码区域以提高识别率
+            int width = screenshot.getWidth();
+            int height = screenshot.getHeight();
+
+            // 二维码通常在屏幕中间偏上位置，计算裁剪区域
+            int cropX = width / 4;
+            int cropY = height / 4;
+            int cropWidth = width / 2;
+            int cropHeight = width / 2; // 使用正方形区域，因为二维码是正方形的
+
+            // 确保裁剪区域不超出边界
+            if (cropX + cropWidth > width)
+                cropWidth = width - cropX;
+            if (cropY + cropHeight > height)
+                cropHeight = height - cropY;
+
+            // 裁剪二维码区域
+            Bitmap qrCodeBitmap = null;
+            try {
+                qrCodeBitmap = Bitmap.createBitmap(screenshot, cropX, cropY, cropWidth, cropHeight);
+                Log.d(TAG, "已裁剪二维码区域: " + cropX + "," + cropY + "," + cropWidth + "," + cropHeight);
+            } catch (Exception e) {
+                Log.e(TAG, "裁剪二维码区域失败，使用原图: " + e.getMessage());
+                qrCodeBitmap = screenshot;
+            }
+
+            com.google.mlkit.vision.common.InputImage inputImage = com.google.mlkit.vision.common.InputImage
+                    .fromBitmap(qrCodeBitmap, 0);
+
+            // 创建一个信号量来等待异步操作完成
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            final StringBuilder result = new StringBuilder();
+
+            // 执行二维码扫描
+            scanner.process(inputImage)
+                    .addOnSuccessListener(barcodes -> {
+                        for (com.google.mlkit.vision.barcode.common.Barcode barcode : barcodes) {
+                            String rawValue = barcode.getRawValue();
+                            if (rawValue != null && !rawValue.isEmpty()) {
+                                result.append(rawValue);
+                                Log.d(TAG, "成功识别二维码: " + rawValue);
+                                break; // 只处理第一个找到的二维码
+                            }
+                        }
+                        latch.countDown();
+                    })
+                    .addOnFailureListener(e -> {
+                        Log.e(TAG, "二维码识别失败: " + e.getMessage());
+                        latch.countDown();
+                    });
+
+            // 等待最多2秒
+            latch.await(2, java.util.concurrent.TimeUnit.SECONDS);
+
+            // 释放资源
+            scanner.close();
+
+            // 回收裁剪图像
+            if (qrCodeBitmap != null && qrCodeBitmap != screenshot) {
+                qrCodeBitmap.recycle();
+            }
+
+            if (result.length() > 0) {
+                return result.toString();
+            } else {
+                // 如果没有识别到，返回空字符串
+                Log.w(TAG, "未能识别二维码");
+                return "";
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "二维码识别过程中出错: " + e.getMessage(), e);
+            // 发生错误时返回空字符串
+            return "";
+        }
+    }
+
+    // 解析过期时间
+    private long parseExpiryTime(String timeText) {
+        try {
+            // 假设时间格式为 "00:59"，表示还有59秒过期
+            String[] parts = timeText.split(":");
+            if (parts.length == 2) {
+                int minutes = Integer.parseInt(parts[0]);
+                int seconds = Integer.parseInt(parts[1]);
+                return System.currentTimeMillis() + (minutes * 60 + seconds) * 1000;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "解析过期时间出错", e);
+        }
+
+        // 默认1分钟后过期
+        return System.currentTimeMillis() + 60000;
+    }
+
+    // 接收MediaProjection权限结果
+    public void setMediaProjectionResult(Intent data) {
+        Log.d(TAG, "收到MediaProjection权限结果");
+        this.resultData = data;
+        // 初始化媒体投影
+        initMediaProjection(data);
+
+        // 如果当前正在托管，重新开始托管任务以使用新的权限
+        if (isHosting && hostingHandler != null) {
+            Log.d(TAG, "托管任务已在运行，将使用新授权的截屏能力");
+        }
+    }
+
+    // 初始化屏幕捕获
+    private void initMediaProjection(Intent data) {
+        if (data == null) {
+            Log.e(TAG, "初始化MediaProjection失败：数据为空");
+            return;
+        }
+
+        try {
+            Log.d(TAG, "开始初始化MediaProjection");
+            // 释放旧的资源
+            releaseMediaProjection();
+
+            // 获取屏幕信息
+            DisplayMetrics metrics = new DisplayMetrics();
+            WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            windowManager.getDefaultDisplay().getMetrics(metrics);
+            screenDensity = metrics.densityDpi;
+            screenWidth = metrics.widthPixels;
+            screenHeight = metrics.heightPixels;
+
+            // 创建ImageReader来接收屏幕图像
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+            imageReader.setOnImageAvailableListener(reader -> {
+                try {
+                    Image image = reader.acquireLatestImage();
+                    if (image != null) {
+                        try {
+                            // 转换为Bitmap
+                            Bitmap bitmap = imageToBitmap(image);
+                            if (bitmap != null) {
+                                // 保存最后一次截图
+                                if (lastScreenshot != null) {
+                                    lastScreenshot.recycle();
+                                }
+                                lastScreenshot = bitmap;
+                            }
+                        } finally {
+                            image.close();
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "处理截图失败: " + e.getMessage(), e);
+                }
+            }, null);
+
+            // 创建MediaProjection
+            MediaProjectionManager projectionManager = (MediaProjectionManager) getSystemService(
+                    Context.MEDIA_PROJECTION_SERVICE);
+            mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, data);
+
+            if (mediaProjection == null) {
+                Log.e(TAG, "无法创建MediaProjection实例");
+                mediaProjectionInitialized = false;
+                return;
+            }
+
+            // 创建VirtualDisplay
+            virtualDisplay = mediaProjection.createVirtualDisplay(
+                    "ScreenCapture",
+                    screenWidth,
+                    screenHeight,
+                    screenDensity,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    imageReader.getSurface(),
+                    null,
+                    null);
+
+            if (virtualDisplay == null) {
+                Log.e(TAG, "无法创建VirtualDisplay");
+                releaseMediaProjection();
+                mediaProjectionInitialized = false;
+                return;
+            }
+
+            Log.i(TAG, "MediaProjection初始化成功，屏幕尺寸: " + screenWidth + "x" + screenHeight);
+            mediaProjectionInitialized = true;
+        } catch (Exception e) {
+            Log.e(TAG, "初始化MediaProjection失败: " + e.getMessage(), e);
+            releaseMediaProjection();
+            mediaProjectionInitialized = false;
+        }
+    }
+
+    // 停止托管
+    private void stopHosting() {
+        if (!isHosting) {
+            return;
+        }
+
+        isHosting = false;
+
+        // 停止截图定时任务
+        if (hostingHandler != null) {
+            hostingHandler.removeCallbacksAndMessages(null);
+        }
+
+        // 隐藏取消托管按钮
+        if (cancelHostingView != null) {
+            try {
+                if (cancelHostingView.isShown()) {
+                    windowManager.removeView(cancelHostingView);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "移除取消托管按钮时出错", e);
+            }
+            cancelHostingView = null;
+        }
+
+        // 显示悬浮窗
+        if (floatingView != null && !floatingView.isShown()) {
+            try {
+                WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        getWindowLayoutType(),
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                        PixelFormat.TRANSLUCENT);
+                params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
+                params.x = 0;
+                params.y = 0;
+                windowManager.addView(floatingView, params);
+            } catch (Exception e) {
+                // 视图可能已经添加
+                Log.e(TAG, "添加悬浮窗时出错", e);
+            }
+        }
+
+        Toast.makeText(this, "已停止托管支付码", Toast.LENGTH_SHORT).show();
+    }
+
+    // 将Image转换为Bitmap
+    private Bitmap imageToBitmap(Image image) {
+        if (image == null) {
+            return null;
+        }
+
+        Image.Plane[] planes = image.getPlanes();
+        if (planes.length == 0) {
+            return null;
+        }
+
+        ByteBuffer buffer = planes[0].getBuffer();
+        int pixelStride = planes[0].getPixelStride();
+        int rowStride = planes[0].getRowStride();
+        int rowPadding = rowStride - pixelStride * image.getWidth();
+
+        // 创建Bitmap
+        Bitmap bitmap = Bitmap.createBitmap(
+                image.getWidth() + rowPadding / pixelStride,
+                image.getHeight(),
+                Bitmap.Config.ARGB_8888);
+        bitmap.copyPixelsFromBuffer(buffer);
+
+        // 如果有padding，裁剪为正确的尺寸
+        if (rowPadding > 0) {
+            Bitmap croppedBitmap = Bitmap.createBitmap(
+                    bitmap, 0, 0, image.getWidth(), image.getHeight());
+            bitmap.recycle();
+            return croppedBitmap;
+        }
+
+        return bitmap;
     }
 }

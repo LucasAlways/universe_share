@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="16dp">
+
+    <Button
+        android:id="@+id/btnCancelHosting"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="取消托管"
+        android:textSize="16sp"
+        android:padding="12dp"
+        android:background="@drawable/rounded_button"
+        android:textColor="#FFFFFF" />
+
+</FrameLayout> 

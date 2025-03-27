@@ -43,3 +43,34 @@ android {
 flutter {
     source = "../.."
 }
+
+// 添加自定义的 Maven 仓库配置
+repositories {
+    mavenCentral()
+    // 添加 OpenPnp Maven 仓库，它有 OpenCV4Android
+    maven {
+        url = uri("https://javacv.scijava.org/")
+    }
+    // 添加 Bytedeco 仓库 (另一个 OpenCV 可用的仓库)
+    maven {
+        url = uri("https://packagecloud.io/bytedeco/javacpp/maven2/")
+    }
+}
+
+dependencies {
+    // 移除OpenCV远程依赖，我们已经有了纯Java实现
+    // implementation("org.opencv:opencv-android:4.7.0")
+    
+    // ML Kit 文本识别和条码扫描
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    implementation("com.google.android.gms:play-services-tasks:18.0.2")
+    
+    // 图像处理
+    implementation("com.google.android.gms:play-services-mlkit-image-labeling:16.0.8")
+    implementation("androidx.exifinterface:exifinterface:1.3.6")
+    
+    testImplementation("junit:junit:4.13.2")
+    // ... existing dependencies ...
+}
