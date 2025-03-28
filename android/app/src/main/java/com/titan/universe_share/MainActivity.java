@@ -5,6 +5,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
 import android.widget.Toast;
@@ -12,6 +13,10 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.IntentFilter;
 import android.media.projection.MediaProjectionManager;
+import android.content.SharedPreferences;
+import android.os.Parcel;
+import android.util.Base64;
+import android.graphics.Bitmap;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -28,6 +33,7 @@ public class MainActivity extends FlutterActivity {
     private BroadcastReceiver permissionRequestReceiver;
     private static final String TAG = "MainActivity";
     private boolean mediaProjectionRequested = false;
+    private Intent resultData; // 保存用户授予的MediaProjection权限
 
     @Override
     public void configureFlutterEngine(@NonNull FlutterEngine flutterEngine) {
@@ -68,7 +74,16 @@ public class MainActivity extends FlutterActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 不在创建时自动请求权限，等待用户操作触发
+
+        // 尝试加载保存的MediaProjection授权数据
+        Intent savedProjectionData = loadSavedMediaProjectionData();
+        if (savedProjectionData != null) {
+            Log.d(TAG, "已找到保存的MediaProjection授权数据");
+            resultData = savedProjectionData;
+            mediaProjectionRequested = true;
+        } else {
+            Log.d(TAG, "未找到有效的授权数据，需要重新申请权限");
+        }
     }
 
     @Override
@@ -86,41 +101,64 @@ public class MainActivity extends FlutterActivity {
 
     private void startFloatingWindow(MethodChannel.Result result) {
         if (!checkOverlayPermission()) {
-            result.error("PERMISSION_DENIED", "没有悬浮窗权限", null);
+            if (result != null) {
+                result.error("PERMISSION_DENIED", "没有悬浮窗权限", null);
+            }
             return;
         }
 
         try {
-            Intent intent = new Intent(this, FloatingWindowService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent);
-            } else {
-                startService(intent);
+            // 确保服务已停止，以便重新启动
+            try {
+                stopService(new Intent(this, FloatingWindowService.class));
+                Log.d(TAG, "停止现有的悬浮窗服务（如果存在）");
+            } catch (Exception e) {
+                Log.d(TAG, "停止服务出错（可能服务不存在）: " + e.getMessage());
             }
 
-            // 先返回结果表示成功启动
-            result.success(true);
+            // 稍微延迟重新启动，确保服务已完全停止
+            new Handler().postDelayed(() -> {
+                try {
+                    Intent intent = new Intent(this, FloatingWindowService.class);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(intent);
+                    } else {
+                        startService(intent);
+                    }
 
-            // 如果还没请求过截屏权限，主动请求
-            if (!mediaProjectionRequested) {
-                new Handler().postDelayed(this::requestMediaProjectionPermission, 500);
-                mediaProjectionRequested = true;
-            }
+                    Log.d(TAG, "悬浮窗服务启动成功");
+                    if (result != null) {
+                        result.success(true);
+                    }
 
-            // 添加短暂延迟确保服务已启动
-            new Handler().postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    // 退出到桌面
-                    Intent homeIntent = new Intent(Intent.ACTION_MAIN);
-                    homeIntent.addCategory(Intent.CATEGORY_HOME);
-                    homeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    startActivity(homeIntent);
+                    // 如果已经有截屏权限，重新传递给服务
+                    if (mediaProjectionRequested && resultData != null) {
+                        Log.d(TAG, "传递保存的MediaProjection权限");
+                        new Handler().postDelayed(() -> sendMediaProjectionResult(resultData), 1000);
+                    } else {
+                        // 如果还没请求过截屏权限，主动请求
+                        new Handler().postDelayed(this::requestMediaProjectionPermission, 1000);
+                    }
+
+                    // 添加短暂延迟确保服务已启动
+                    new Handler().postDelayed(() -> {
+                        // 退出到桌面
+                        Intent homeIntent = new Intent(Intent.ACTION_MAIN);
+                        homeIntent.addCategory(Intent.CATEGORY_HOME);
+                        homeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(homeIntent);
+                    }, 2000);
+                } catch (Exception e) {
+                    Log.e(TAG, "启动悬浮窗服务失败: " + e.getMessage(), e);
+                    if (result != null) {
+                        result.error("START_ERROR", "启动悬浮窗服务失败: " + e.getMessage(), null);
+                    }
                 }
-            }, 1000); // 增加延迟时间
-
+            }, 500);
         } catch (Exception e) {
-            result.error("START_ERROR", "启动悬浮窗服务失败: " + e.getMessage(), null);
+            if (result != null) {
+                result.error("START_ERROR", "启动悬浮窗服务失败: " + e.getMessage(), null);
+            }
             e.printStackTrace();
         }
     }
@@ -164,74 +202,96 @@ public class MainActivity extends FlutterActivity {
             Log.d(TAG, "正在请求截屏权限");
             MediaProjectionManager projectionManager = (MediaProjectionManager) getSystemService(
                     Context.MEDIA_PROJECTION_SERVICE);
-            Intent intent = projectionManager.createScreenCaptureIntent();
-            startActivityForResult(intent, REQUEST_CODE_MEDIA_PROJECTION);
+            Intent captureIntent = projectionManager.createScreenCaptureIntent();
+            startActivityForResult(captureIntent, REQUEST_CODE_MEDIA_PROJECTION);
+
+            // 显示提示，告知用户需要给予权限
+            Toast.makeText(this, "请授予屏幕录制权限以启用截图功能", Toast.LENGTH_LONG).show();
         } catch (Exception e) {
             Log.e(TAG, "请求截屏权限失败: " + e.getMessage(), e);
-            Toast.makeText(this, "获取截屏权限失败，托管功能可能受限", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "无法请求截屏权限: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 
     // 注册广播接收器，接收服务的权限请求
     private void registerScreenCapturePermissionReceiver() {
-        permissionRequestReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                if ("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION".equals(intent.getAction())) {
+        try {
+            permissionRequestReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
                     Log.d(TAG, "收到截屏权限请求广播");
-                    // 使用主线程处理器延迟请求，避免频繁请求
-                    new Handler().postDelayed(() -> {
-                        // 避免连续多次请求
-                        if (!mediaProjectionRequested) {
-                            requestMediaProjectionPermission();
-                            mediaProjectionRequested = true;
-                        }
-                    }, 500);
-                }
-            }
-        };
 
-        IntentFilter filter = new IntentFilter("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION");
-        registerReceiver(permissionRequestReceiver, filter);
+                    // 检查是否已有有效的权限数据
+                    if (mediaProjectionRequested && resultData != null) {
+                        Log.d(TAG, "已有有效的MediaProjection权限数据，直接使用");
+                        // 重新发送已有的权限数据给服务
+                        sendMediaProjectionResult(resultData);
+                        return;
+                    }
+
+                    // 尝试加载保存的权限数据
+                    Intent savedData = loadSavedMediaProjectionData();
+                    if (savedData != null) {
+                        Log.d(TAG, "找到保存的MediaProjection权限数据，使用保存的数据");
+                        resultData = savedData;
+                        mediaProjectionRequested = true;
+                        sendMediaProjectionResult(resultData);
+                        return;
+                    }
+
+                    // 没有有效的权限数据，需要重新请求
+                    Log.d(TAG, "没有有效的权限数据，需要重新请求");
+                    mediaProjectionRequested = false;
+                    resultData = null;
+
+                    // 检查服务是否存在
+                    if (FloatingWindowServiceHolder.getService() != null) {
+                        Log.d(TAG, "服务已存在，重新请求权限");
+                        requestMediaProjectionPermission();
+                    } else {
+                        Log.d(TAG, "无法找到服务实例，先启动服务");
+                        startFloatingWindow(null);
+                        // 延迟请求权限，确保服务已启动
+                        new Handler().postDelayed(() -> {
+                            requestMediaProjectionPermission();
+                        }, 1000);
+                    }
+                }
+            };
+
+            // 注册广播接收器，使用正确的导出标志
+            IntentFilter filter = new IntentFilter("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION");
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(permissionRequestReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(permissionRequestReceiver, filter);
+            }
+
+            Log.d(TAG, "截屏权限请求广播接收器已注册");
+        } catch (Exception e) {
+            Log.e(TAG, "注册截屏权限请求广播接收器失败: " + e.getMessage(), e);
+        }
     }
 
     private void sendMediaProjectionResult(Intent data) {
-        if (data == null) {
-            Log.e(TAG, "MediaProjection数据为空");
-            return;
-        }
-
-        try {
-            // 延迟发送，确保服务已启动
-            new Handler().postDelayed(() -> {
-                try {
-                    // 尝试重启服务确保获得最新实例
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                if (FloatingWindowServiceHolder.getService() != null) {
+                    FloatingWindowServiceHolder.getService().setMediaProjectionResult(data);
+                } else {
+                    // 启动服务并重试
                     Intent serviceIntent = new Intent(this, FloatingWindowService.class);
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent);
-                    } else {
-                        startService(serviceIntent);
-                    }
-
-                    // 再次延迟，确保服务已启动
+                    startService(serviceIntent);
                     new Handler().postDelayed(() -> {
-                        FloatingWindowService service = FloatingWindowServiceHolder.getService();
-                        if (service != null) {
-                            service.setMediaProjectionResult(data);
-                            Log.i(TAG, "成功将截屏权限传递给服务");
-                            Toast.makeText(this, "截屏功能已准备就绪", Toast.LENGTH_SHORT).show();
-                        } else {
-                            Log.e(TAG, "无法获取FloatingWindowService实例");
-                            Toast.makeText(this, "截屏功能初始化失败", Toast.LENGTH_SHORT).show();
+                        if (FloatingWindowServiceHolder.getService() != null) {
+                            FloatingWindowServiceHolder.getService().setMediaProjectionResult(data);
                         }
-                    }, 500);
-                } catch (Exception e) {
-                    Log.e(TAG, "传递截屏权限失败: " + e.getMessage(), e);
+                    }, 1000);
                 }
-            }, 500);
-        } catch (Exception e) {
-            Log.e(TAG, "传递MediaProjection结果时出错: " + e.getMessage(), e);
-        }
+            } catch (Exception e) {
+                Log.e(TAG, "传递权限失败: " + e.getMessage());
+            }
+        });
     }
 
     @Override
@@ -257,17 +317,162 @@ public class MainActivity extends FlutterActivity {
             Log.d(TAG, "收到截屏权限结果: " + resultCode);
             if (resultCode == RESULT_OK && data != null) {
                 Log.d(TAG, "用户同意截屏权限");
-                // 确保保存了权限结果
+
+                // 保存权限结果到内存以便本次会话使用
                 mediaProjectionRequested = true;
-                // 发送结果给服务
+                resultData = data;
+
+                // 直接发送到服务
                 sendMediaProjectionResult(data);
+
+                // 显示成功提示
+                Toast.makeText(this, "截屏权限获取成功，已保存授权", Toast.LENGTH_SHORT).show();
             } else {
                 Log.e(TAG, "用户拒绝授予MediaProjection权限");
                 Toast.makeText(this, "截屏权限被拒绝，托管功能将使用备选模式", Toast.LENGTH_LONG).show();
                 mediaProjectionRequested = false;
+                resultData = null;
+
+                // 清除之前保存的权限数据
+                clearSavedMediaProjectionData();
             }
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    // 保存MediaProjection权限数据到SharedPreferences
+    private void saveMediaProjectionData(int resultCode, Intent data) {
+        try {
+            // 注意：这种方法并不适用于所有设备，因为Intent序列化可能有限制
+            // 但我们仍然尝试保存，以便在支持的设备上工作
+            SharedPreferences preferences = getSharedPreferences("MediaProjectionPref", MODE_PRIVATE);
+            SharedPreferences.Editor editor = preferences.edit();
+
+            // 保存结果代码
+            editor.putInt("result_code", resultCode);
+
+            // 序列化Intent数据
+            Bundle bundle = data.getExtras();
+            if (bundle != null) {
+                editor.putString("intent_extras", bundleToString(bundle));
+            }
+
+            // 保存Intent的action, data等基本信息
+            if (data.getAction() != null) {
+                editor.putString("intent_action", data.getAction());
+            }
+            if (data.getDataString() != null) {
+                editor.putString("intent_data", data.getDataString());
+            }
+
+            // 保存授权时间
+            editor.putLong("auth_time", System.currentTimeMillis());
+
+            editor.apply();
+            Log.d(TAG, "成功保存MediaProjection授权数据");
+        } catch (Exception e) {
+            Log.e(TAG, "保存MediaProjection数据失败: " + e.getMessage(), e);
+        }
+    }
+
+    // 从SharedPreferences加载MediaProjection权限数据
+    public Intent loadSavedMediaProjectionData() {
+        try {
+            SharedPreferences preferences = getSharedPreferences("MediaProjectionPref", MODE_PRIVATE);
+
+            // 检查是否有保存的数据
+            if (!preferences.contains("result_code")) {
+                Log.d(TAG, "没有找到保存的MediaProjection数据");
+                return null;
+            }
+
+            // 检查授权时间是否超过24小时
+            long authTime = preferences.getLong("auth_time", 0);
+            if (System.currentTimeMillis() - authTime > 24 * 60 * 60 * 1000) {
+                Log.d(TAG, "保存的MediaProjection授权已过期");
+                clearSavedMediaProjectionData();
+                return null;
+            }
+
+            // 重建Intent
+            Intent intent = new Intent();
+
+            // 设置基本信息
+            String action = preferences.getString("intent_action", null);
+            if (action != null) {
+                intent.setAction(action);
+            }
+
+            String dataString = preferences.getString("intent_data", null);
+            if (dataString != null) {
+                intent.setData(Uri.parse(dataString));
+            }
+
+            // 尝试恢复extras
+            String bundleString = preferences.getString("intent_extras", null);
+            if (bundleString != null) {
+                try {
+                    Bundle bundle = stringToBundle(bundleString);
+                    intent.putExtras(bundle);
+                } catch (Exception e) {
+                    Log.e(TAG, "恢复Intent extras失败: " + e.getMessage());
+                }
+            }
+
+            Log.d(TAG, "成功加载保存的MediaProjection数据");
+
+            // 设置已请求标志
+            mediaProjectionRequested = true;
+            resultData = intent;
+
+            return intent;
+        } catch (Exception e) {
+            Log.e(TAG, "加载MediaProjection数据失败: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    // 清除保存的MediaProjection数据
+    private void clearSavedMediaProjectionData() {
+        try {
+            SharedPreferences preferences = getSharedPreferences("MediaProjectionPref", MODE_PRIVATE);
+            SharedPreferences.Editor editor = preferences.edit();
+            editor.clear();
+            editor.apply();
+            Log.d(TAG, "已清除保存的MediaProjection数据");
+        } catch (Exception e) {
+            Log.e(TAG, "清除MediaProjection数据失败: " + e.getMessage());
+        }
+    }
+
+    // 将Bundle转换为String
+    private String bundleToString(Bundle bundle) {
+        try {
+            Parcel parcel = Parcel.obtain();
+            bundle.writeToParcel(parcel, 0);
+            byte[] bytes = parcel.marshall();
+            parcel.recycle();
+            return Base64.encodeToString(bytes, Base64.DEFAULT);
+        } catch (Exception e) {
+            Log.e(TAG, "Bundle序列化失败: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // 将String转换回Bundle
+    private Bundle stringToBundle(String str) {
+        try {
+            byte[] bytes = Base64.decode(str, Base64.DEFAULT);
+            Parcel parcel = Parcel.obtain();
+            parcel.unmarshall(bytes, 0, bytes.length);
+            parcel.setDataPosition(0);
+            Bundle bundle = parcel.readBundle(getClassLoader());
+            parcel.recycle();
+            return bundle;
+        } catch (Exception e) {
+            Log.e(TAG, "Bundle反序列化失败: " + e.getMessage());
+            return null;
+        }
     }
 }

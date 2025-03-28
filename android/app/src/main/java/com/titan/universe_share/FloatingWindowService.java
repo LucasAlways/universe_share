@@ -25,6 +25,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import androidx.core.app.NotificationCompat;
 import android.content.pm.ServiceInfo;
 import android.util.Log;
@@ -62,6 +63,12 @@ import android.os.HandlerThread;
 import android.app.Activity;
 import android.os.Vibrator;
 import java.nio.ByteBuffer;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.Timer;
+import java.util.TimerTask;
 
 public class FloatingWindowService extends Service {
     private static final String TAG = "FloatingWindowService";
@@ -77,12 +84,12 @@ public class FloatingWindowService extends Service {
     // 用于自动隐藏的定时器
     private Handler autoHideHandler;
     private Runnable autoHideRunnable;
-    private static final long AUTO_HIDE_DELAY = 5000; // 5秒无操作后自动隐藏
+    private static final long AUTO_HIDE_DELAY = 3000; // 3秒后自动隐藏
 
     // 用于保持服务存活的定时器
     private Handler keepAliveHandler;
     private Runnable keepAliveRunnable;
-    private static final long KEEP_ALIVE_INTERVAL = 30000; // 每30秒执行一次
+    private static final long KEEP_ALIVE_INTERVAL = 10 * 60 * 1000; // 10分钟保活间隔
 
     // 颜色定义
     private static final int COLOR_PRIMARY = 0xFF2196F3; // 浅蓝色
@@ -104,7 +111,7 @@ public class FloatingWindowService extends Service {
     private boolean isHosting = false;
     private Handler hostingHandler;
     private static final long SCREENSHOT_INTERVAL = 1000; // 每秒检查一次
-    private PaymentTemplateManager templateManager; // 替换templateBitmap
+    private PaymentTemplateManager paymentRecognizer; // 改名为paymentRecognizer，更符合功能
     private long lastQrCodeExpiryTime = 0;
     private String lastQrCodeContent = "";
     private String lastCardNumber = "";
@@ -117,13 +124,22 @@ public class FloatingWindowService extends Service {
     private int screenDensity;
     private int screenHeight;
     private Handler screenshotHandler;
-    private static final String SCREENSHOT_THREAD_NAME = "screenshot-thread";
+    private static final String SCREENSHOT_THREAD_NAME = "ScreenshotThread";
     private Intent resultData; // 保存MediaProjection权限结果
     private long lastLogTime = 0; // 上次记录日志的时间
     private boolean mediaProjectionInitialized = false; // 标记MediaProjection是否已初始化
     private Bitmap lastScreenshot = null; // 最后一次截图
     private Runnable screenshotRunnable; // 持有截图任务的引用
     private static final long HOSTING_INTERVAL = 1000; // 托管任务间隔
+    private boolean isMediaProjectionInitialized = false; // 标记MediaProjection是否已初始化
+    private Timer timer;
+
+    // 广播Action
+    public static final String ACTION_REQUEST_SCREENSHOT_PERMISSION = "com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION";
+
+    // 在类的成员变量部分添加失败计数器
+    private int screenshotFailCount = 0;
+    private static final int MAX_SCREENSHOT_RETRY = 15; // 最大重试次数
 
     @Override
     public void onCreate() {
@@ -138,8 +154,8 @@ public class FloatingWindowService extends Service {
         // 获取屏幕宽度，用于计算边缘位置
         screenWidth = getResources().getDisplayMetrics().widthPixels;
 
-        // 初始化模板管理器
-        templateManager = new PaymentTemplateManager(this);
+        // 初始化支付识别器
+        paymentRecognizer = new PaymentTemplateManager(this);
 
         // 初始化自动隐藏定时器
         autoHideHandler = new Handler(Looper.getMainLooper());
@@ -192,44 +208,94 @@ public class FloatingWindowService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        super.onStartCommand(intent, flags, startId);
+        Log.d(TAG, "服务onStartCommand: " + (intent != null ? intent.getAction() : "无action"));
 
-        // 创建通知渠道
-        createNotificationChannel();
+        try {
+            // 创建通知渠道
+            createNotificationChannel();
 
-        // 立即启动前台服务
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            int serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                serviceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+            // 创建通知
+            Notification notification = createNotification();
+
+            // 先尝试使用基本前台服务启动
+            try {
+                startForeground(NOTIFICATION_ID, notification);
+                Log.d(TAG, "使用基本前台服务类型启动成功");
+            } catch (Exception e) {
+                Log.e(TAG, "启动前台服务失败: " + e.getMessage());
+                // 如果连基本前台服务都启动失败，记录错误但继续执行
             }
-            startForeground(NOTIFICATION_ID, createNotification(), serviceType);
-        } else {
-            startForeground(NOTIFICATION_ID, createNotification());
+
+            // 初始化悬浮窗
+            if (windowManager == null) {
+                initFloatingWindow();
+            }
+
+            // 显示悬浮窗并初始化MediaProjection（如果有权限）
+            showFloatingWindow();
+
+            // 如果已经有MediaProjection权限，延迟初始化
+            if (resultData != null) {
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    try {
+                        // 使用mediaProjection前，先尝试更新前台服务类型包含MEDIA_PROJECTION
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            try {
+                                int serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+                                updateForegroundServiceType(serviceType);
+                                Log.d(TAG, "更新前台服务类型包含MEDIA_PROJECTION");
+                            } catch (Exception e) {
+                                Log.e(TAG, "更新前台服务类型失败: " + e.getMessage());
+                                // 继续尝试初始化MediaProjection，可能会因权限不足而失败
+                            }
+                        }
+
+                        initMediaProjection(resultData);
+                    } catch (Exception e) {
+                        Log.e(TAG, "初始化MediaProjection失败: " + e.getMessage(), e);
+                    }
+                }, 500);
+            }
+
+            // 开始定时器保持服务活跃
+            startKeepAliveTimer();
+
+            return START_STICKY;
+        } catch (Exception e) {
+            Log.e(TAG, "onStartCommand异常: " + e.getMessage(), e);
+            return START_NOT_STICKY;
         }
-
-        // 显示悬浮窗
-        showFloatingWindow();
-
-        // 启动保持服务存活的定时器
-        keepAliveHandler.postDelayed(keepAliveRunnable, KEEP_ALIVE_INTERVAL);
-
-        return START_STICKY;
     }
 
-    // 创建通知渠道
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    CHANNEL_NAME,
+                    "悬浮窗服务",
                     NotificationManager.IMPORTANCE_LOW);
-            channel.setLightColor(Color.BLUE);
-            channel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
+            channel.setDescription("用于支持悬浮窗和屏幕截图的通知");
+            channel.setShowBadge(false);
 
-            NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            manager.createNotificationChannel(channel);
+            NotificationManager notificationManager = getSystemService(NotificationManager.class);
+            if (notificationManager != null) {
+                notificationManager.createNotificationChannel(channel);
+                Log.d(TAG, "通知渠道创建成功");
+            }
         }
+    }
+
+    private void startKeepAliveTimer() {
+        if (timer != null) {
+            timer.cancel();
+        }
+        timer = new Timer();
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                // 每5分钟检查一次服务状态
+                Log.d(TAG, "服务保活检查 - 服务正在运行");
+            }
+        }, 5 * 60 * 1000, 5 * 60 * 1000);
     }
 
     // 创建通知
@@ -264,16 +330,9 @@ public class FloatingWindowService extends Service {
         try {
             Log.d("FloatingWindowService", "开始创建悬浮窗");
 
-            // 确保悬浮窗没有被添加过
-            if (floatingView != null) {
-                try {
-                    windowManager.removeView(floatingView);
-                    Log.d("FloatingWindowService", "移除现有悬浮窗");
-                } catch (Exception e) {
-                    // 忽略如果视图没有被添加的错误
-                    Log.d("FloatingWindowService", "移除现有悬浮窗失败，可能没有被添加: " + e.getMessage());
-                }
-                floatingView = null;
+            // 确保窗口管理器已初始化
+            if (windowManager == null) {
+                windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
             }
 
             // 创建悬浮视图参数
@@ -289,12 +348,46 @@ public class FloatingWindowService extends Service {
             params.x = 0; // 右侧距离
             params.y = 0; // 垂直居中位置
 
-            // 创建现代风格的悬浮视图
-            createModernFloatingView(params);
+            // 创建现代风格的悬浮视图（如果尚未创建）
+            if (floatingView == null) {
+                createModernFloatingView(params);
+            }
 
             // 确认悬浮窗是否成功创建
             if (floatingView != null) {
                 Log.d("FloatingWindowService", "悬浮窗视图创建成功");
+
+                // 检查悬浮窗是否已添加到窗口管理器
+                boolean isFloatingViewAttached = floatingView.getParent() != null;
+                if (!isFloatingViewAttached) {
+                    try {
+                        windowManager.addView(floatingView, params);
+                        Log.d("FloatingWindowService", "成功添加悬浮窗视图到窗口管理器");
+                    } catch (Exception e) {
+                        Log.e("FloatingWindowService", "添加悬浮窗失败: " + e.getMessage(), e);
+                        Toast.makeText(this, "添加悬浮窗失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
+                } else {
+                    Log.d("FloatingWindowService", "悬浮窗视图已存在，不重复添加");
+                    try {
+                        // 更新布局参数
+                        windowManager.updateViewLayout(floatingView, params);
+                        Log.d("FloatingWindowService", "更新悬浮窗布局参数");
+                    } catch (Exception e) {
+                        Log.e("FloatingWindowService", "更新悬浮窗布局失败: " + e.getMessage(), e);
+                    }
+                }
+
+                // 测试悬浮窗可见性
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (floatingView != null && floatingView.isShown()) {
+                        Log.d(TAG, "悬浮窗显示正常");
+                        Toast.makeText(this, "二维码托管服务已启动", Toast.LENGTH_SHORT).show();
+                    } else {
+                        Log.e(TAG, "悬浮窗未正常显示");
+                    }
+                }, 1000);
+
                 // 启动自动隐藏计时器
                 resetAutoHideTimer();
             } else {
@@ -885,11 +978,23 @@ public class FloatingWindowService extends Service {
         handler.post(animationSteps[0]);
     }
 
+    // 获取窗口布局类型
     private int getWindowLayoutType() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             return WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
         } else {
             return WindowManager.LayoutParams.TYPE_PHONE;
+        }
+    }
+
+    // 初始化悬浮窗
+    private void initFloatingWindow() {
+        try {
+            windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            createModernFloatingView(null);
+            Log.d(TAG, "悬浮窗初始化完成");
+        } catch (Exception e) {
+            Log.e(TAG, "初始化悬浮窗失败: " + e.getMessage(), e);
         }
     }
 
@@ -918,9 +1023,9 @@ public class FloatingWindowService extends Service {
             expandedView = null;
         }
 
-        // 释放模板管理器资源
-        if (templateManager != null) {
-            templateManager.release();
+        // 释放识别器资源
+        if (paymentRecognizer != null) {
+            paymentRecognizer.release();
         }
 
         // 移除定时器任务
@@ -936,6 +1041,11 @@ public class FloatingWindowService extends Service {
             hostingHandler.removeCallbacksAndMessages(null);
         }
 
+        if (mediaProjection != null) {
+            mediaProjection.stop();
+            mediaProjection = null;
+        }
+
         Log.d(TAG, "服务已销毁");
     }
 
@@ -946,9 +1056,12 @@ public class FloatingWindowService extends Service {
             return;
         }
 
+        // 保存截图
+        saveScreenshotToFile(screenshot);
+
         // 检查是否是支付界面
         long startTime = System.currentTimeMillis();
-        boolean isPaymentScreen = templateManager.isPaymentScreen(screenshot);
+        boolean isPaymentScreen = paymentRecognizer.isPaymentScreen(screenshot);
         Log.d(TAG, "支付界面检测耗时: " + (System.currentTimeMillis() - startTime) + "ms, 结果: " + isPaymentScreen);
 
         if (!isPaymentScreen) {
@@ -964,7 +1077,7 @@ public class FloatingWindowService extends Service {
 
         // 提取付款信息
         startTime = System.currentTimeMillis();
-        String[] paymentInfo = templateManager.extractPaymentInfo(screenshot);
+        String[] paymentInfo = paymentRecognizer.extractPaymentInfo(screenshot);
         Log.d(TAG, "付款信息提取耗时: " + (System.currentTimeMillis() - startTime) + "ms");
 
         if (paymentInfo == null || paymentInfo.length < 3) {
@@ -972,7 +1085,7 @@ public class FloatingWindowService extends Service {
             return;
         }
 
-        // 根据utils包中的PaymentTemplateManager调整索引顺序
+        // 获取提取的信息
         String timeText = paymentInfo[0]; // 时间在第一个位置
         String cardNumber = paymentInfo[1]; // 卡号在第二个位置
         String balance = paymentInfo[2]; // 余额在第三个位置
@@ -982,7 +1095,7 @@ public class FloatingWindowService extends Service {
         // 检查是否需要通知（新二维码或即将过期）
         boolean isNewQrCode = !qrContent.isEmpty() && !qrContent.equals(lastQrCodeContent);
         boolean isInfoChanged = !cardNumber.equals(lastCardNumber) || !balance.equals(lastBalance);
-        boolean isExpiring = templateManager.isQrCodeExpiring(timeText);
+        boolean isExpiring = paymentRecognizer.isQrCodeExpiring(timeText);
 
         Log.d(TAG, "状态 - 新二维码: " + isNewQrCode + ", 信息变化: " + isInfoChanged + ", 即将过期: " + isExpiring);
 
@@ -1045,81 +1158,149 @@ public class FloatingWindowService extends Service {
     }
 
     // 开始二维码托管
-    private void startHosting() {
+    public void startHosting() {
         if (isHosting) {
-            Log.d(TAG, "托管已在进行中，不重复启动");
-            return;
+            return; // 避免重复启动
         }
 
+        Log.i(TAG, "开始托管任务");
         isHosting = true;
 
-        // 清除之前的信息记录
-        lastQrCodeContent = null;
-        lastCardNumber = null;
-        lastBalance = null;
-        lastQrCodeExpiryTime = 0;
+        // 重置截图失败次数
+        screenshotFailCount = 0;
 
-        Log.i(TAG, "开始托管支付码...");
-
-        // 初始化Handler用于定期任务
-        if (hostingHandler == null) {
-            hostingHandler = new Handler(Looper.getMainLooper());
-        }
-
-        // 创建一个Runnable用于截图任务
-        screenshotRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (!isHosting) {
-                    Log.d(TAG, "托管已停止，取消截图任务");
-                    return;
-                }
-
-                try {
-                    // 捕获屏幕
-                    Bitmap screenshot = takeScreenshot();
-
-                    if (screenshot != null) {
-                        // 记录截图尺寸
-                        Log.d(TAG, "截图尺寸: " + screenshot.getWidth() + "x" + screenshot.getHeight());
-
-                        // 处理截图
-                        processScreenshot(screenshot);
-
-                        // 回收位图避免内存泄漏
-                        screenshot.recycle();
-                    } else {
-                        Log.w(TAG, "截图捕获失败");
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "截图任务执行错误: " + e.getMessage(), e);
-                } finally {
-                    // 继续下一次截图，无论成功与否
-                    if (isHosting && hostingHandler != null) {
-                        hostingHandler.postDelayed(this, HOSTING_INTERVAL);
-                    }
-                }
-            }
-        };
-
-        // 立即开始第一次截图任务
-        if (hostingHandler != null) {
-            hostingHandler.post(screenshotRunnable);
-        }
-
-        // 隐藏悬浮窗
-        if (floatingView != null && floatingView.isShown()) {
+        // 尝试启动截图处理线程
+        if (screenshotHandler == null) {
             try {
-                windowManager.removeView(floatingView);
+                HandlerThread handlerThread = new HandlerThread(SCREENSHOT_THREAD_NAME);
+                handlerThread.start();
+                screenshotHandler = new Handler(handlerThread.getLooper());
             } catch (Exception e) {
-                Log.e(TAG, "移除悬浮窗失败: " + e.getMessage());
+                Log.e(TAG, "创建截图线程失败: " + e.getMessage(), e);
+            }
+        }
+
+        // 首次检查是否有截图权限
+        if (!isMediaProjectionInitialized || mediaProjection == null) {
+            Log.w(TAG, "无截图权限，请求一次性权限");
+            // 先尝试加载已保存的权限数据
+            if (resultData != null) {
+                Log.d(TAG, "使用保存的MediaProjection权限数据");
+                initMediaProjection(resultData);
+            } else {
+                // 如果没有保存的权限数据，请求新权限
+                requestScreenCapturePermission();
+                // 显示等待授权UI
+                updateScreenshotStatusUI(true, "等待用户授权截图...");
+
+                // 为避免阻塞当前方法，下面的托管启动流程仍然会继续
+                // 当权限获得后，服务会自动使用新权限
             }
         }
 
         // 显示取消托管按钮
         showCancelHostingButton();
 
-        Toast.makeText(this, "已开始托管支付码", Toast.LENGTH_SHORT).show();
+        // 创建托管处理线程
+        if (hostingHandler == null) {
+            hostingHandler = new Handler();
+        }
+
+        // 定义截图任务
+        screenshotRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isHosting) {
+                    Log.d(TAG, "托管已停止，不再执行截图任务");
+                    return;
+                }
+
+                try {
+                    // 检查截图计数，如果超出最大重试次数则停止托管
+                    if (screenshotFailCount >= MAX_SCREENSHOT_RETRY) {
+                        Log.e(TAG, "截图失败次数过多（" + MAX_SCREENSHOT_RETRY + "次），停止尝试");
+                        // 更新UI显示错误
+                        updateScreenshotStatusUI(true, "截图失败次数过多，请检查权限或重启应用");
+                        // 停止托管
+                        stopHosting();
+                        return;
+                    }
+
+                    // 只有在初次失败超过5次后，才尝试重新请求权限
+                    if (screenshotFailCount > 5 && screenshotFailCount % 5 == 0 && !isMediaProjectionInitialized
+                            && resultData == null) {
+                        Log.w(TAG, "多次截图失败且无权限，请求权限");
+                        requestScreenCapturePermission();
+                        // 显示等待授权UI
+                        updateScreenshotStatusUI(true, "等待用户授权截图...");
+                        // 延迟继续尝试
+                        hostingHandler.postDelayed(this, HOSTING_INTERVAL * 2);
+                        return;
+                    }
+
+                    Log.d(TAG, "执行截图任务");
+                    Bitmap screenshot = takeScreenshot();
+
+                    if (screenshot != null) {
+                        // 截图成功，重置失败计数
+                        screenshotFailCount = 0;
+                        updateScreenshotStatusUI(false, "截图成功，持续监控中...");
+                        // 处理截图
+                        processScreenshot(screenshot);
+                    } else {
+                        // 截图失败，增加失败计数
+                        screenshotFailCount++;
+                        Log.w(TAG, "无法获取截图，失败次数: " + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY);
+                        updateScreenshotStatusUI(true,
+                                "截图失败，重试中... (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+
+                        // 如果已经有权限数据但截图失败，可能是权限过期，每3次失败尝试重新初始化
+                        if (resultData != null && (mediaProjection == null || !isMediaProjectionInitialized)
+                                && screenshotFailCount % 3 == 0) {
+                            Log.d(TAG, "尝试重新初始化权限数据");
+                            // 重新初始化MediaProjection
+                            initMediaProjection(resultData);
+                        }
+                    }
+
+                    // 安排下一次截图任务
+                    if (isHosting) {
+                        hostingHandler.postDelayed(this, HOSTING_INTERVAL);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "执行截图任务时出错: " + e.getMessage(), e);
+                    hostingHandler.postDelayed(this, HOSTING_INTERVAL * 2); // 出错后延长间隔
+                }
+            }
+        };
+
+        // 启动截图任务
+        hostingHandler.post(screenshotRunnable);
+        Log.i(TAG, "托管任务已启动");
+    }
+
+    // 停止托管任务
+    public void stopHosting() {
+        Log.i(TAG, "停止托管任务");
+        isHosting = false;
+
+        // 重置截图失败计数
+        screenshotFailCount = 0;
+
+        // 清理截图任务
+        screenshotRunnable = null;
+
+        // 恢复UI
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (floatingView != null) {
+                floatingView.setVisibility(View.VISIBLE);
+            }
+            if (cancelHostingView != null) {
+                cancelHostingView.setVisibility(View.GONE);
+            }
+
+            Toast.makeText(this, "托管已停止", Toast.LENGTH_SHORT).show();
+        });
     }
 
     // 显示取消托管按钮
@@ -1152,84 +1333,225 @@ public class FloatingWindowService extends Service {
         }
     }
 
-    // 截取屏幕
+    // 截取屏幕截图
     public Bitmap takeScreenshot() {
-        // 一些设备上可能需要额外权限或实现
-        // 应该使用MediaProjection API进行屏幕截图
-        try {
-            // 如果已初始化MediaProjection，尝试捕获实际屏幕
-            if (mediaProjectionInitialized && lastScreenshot != null) {
-                // 返回深拷贝以避免并发修改
-                Bitmap screenshot = lastScreenshot.copy(lastScreenshot.getConfig(), true);
-                Log.d(TAG, "成功捕获屏幕截图: " + screenshot.getWidth() + "x" + screenshot.getHeight());
-                return screenshot;
-            } else {
-                // 如果10秒内没有日志，则记录这个消息
-                long currentTime = System.currentTimeMillis();
-                if (currentTime - lastLogTime > 10000) {
-                    if (!mediaProjectionInitialized) {
-                        Log.w(TAG, "MediaProjection未初始化，无法截屏，将使用模板图像");
-                    } else {
-                        Log.w(TAG, "截图未准备好，将使用模板图像");
-                    }
-                    lastLogTime = currentTime;
-
-                    // 请求截屏权限
-                    requestScreenCapturePermission();
-                }
-            }
-
-            // 如果无法获取实际截图，则使用模板图像进行测试
-            if (templateManager != null) {
-                Bitmap template = templateManager.getTemplate(PaymentTemplateManager.TEMPLATE_PAYMENT);
-                if (template != null) {
-                    // 返回深拷贝以避免并发修改
-                    return template.copy(template.getConfig(), true);
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "截屏时发生错误: " + e.getMessage(), e);
+        if (resultData == null) {
+            Log.e(TAG, "无法截图: 没有MediaProjection权限数据");
+            screenshotFailCount++;
+            updateScreenshotStatusUI(true, "截图失败 (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+            requestScreenCapturePermission();
+            return null;
         }
 
-        return null;
+        Log.d(TAG, "开始截取屏幕");
+
+        // 保存截图操作的时间戳
+        final long startTime = System.currentTimeMillis();
+
+        ImageReader localImageReader = null;
+        VirtualDisplay localVirtualDisplay = null;
+        MediaProjection localMediaProjection = null;
+        Bitmap bitmap = null;
+
+        try {
+            // 创建ImageReader
+            localImageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 1);
+
+            // 创建图像可用的闭锁和引用
+            final CountDownLatch latch = new CountDownLatch(1);
+            final AtomicReference<Image> imageRef = new AtomicReference<>();
+
+            // 创建监听器 - 必须在创建VirtualDisplay之前设置
+            ImageReader.OnImageAvailableListener onImageAvailableListener = reader -> {
+                try {
+                    Image image = reader.acquireLatestImage();
+                    if (image != null) {
+                        imageRef.set(image);
+                        latch.countDown();
+                    } else {
+                        latch.countDown();
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "获取图像时出错: " + e.getMessage(), e);
+                    latch.countDown();
+                }
+            };
+
+            // 注意：在创建VirtualDisplay之前设置监听器
+            localImageReader.setOnImageAvailableListener(onImageAvailableListener, new Handler(Looper.getMainLooper()));
+
+            try {
+                // 对每次截图使用新的MediaProjection实例
+                MediaProjectionManager projectionManager = (MediaProjectionManager) getSystemService(
+                        Context.MEDIA_PROJECTION_SERVICE);
+                localMediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, resultData);
+
+                if (localMediaProjection == null) {
+                    Log.e(TAG, "无法创建新的MediaProjection实例");
+                    screenshotFailCount++;
+                    updateScreenshotStatusUI(true,
+                            "无法创建MediaProjection实例 (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+                    requestScreenCapturePermission();
+                    return null;
+                }
+
+                // 创建VirtualDisplay - 每次截图使用唯一的名称
+                String displayName = "ScreenCapture_" + System.currentTimeMillis();
+                localVirtualDisplay = localMediaProjection.createVirtualDisplay(
+                        displayName,
+                        screenWidth, screenHeight, screenDensity,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, // 使用AUTO_MIRROR
+                        localImageReader.getSurface(), null, null);
+
+                if (localVirtualDisplay == null) {
+                    Log.e(TAG, "无法创建VirtualDisplay");
+                    screenshotFailCount++;
+                    updateScreenshotStatusUI(true,
+                            "无法创建虚拟显示 (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+                    return null;
+                }
+
+                // 等待图像可用，最多等待500毫秒
+                if (!latch.await(500, TimeUnit.MILLISECONDS)) {
+                    Log.w(TAG, "等待图像超时");
+                    screenshotFailCount++;
+                    updateScreenshotStatusUI(true, "等待图像超时 (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+                    return null;
+                }
+
+                Image image = imageRef.get();
+                if (image != null) {
+                    bitmap = imageToBitmap(image);
+                    image.close();
+
+                    // 截图成功，重置失败计数
+                    if (bitmap != null) {
+                        screenshotFailCount = 0;
+                        updateScreenshotStatusUI(false, "截图成功");
+                    }
+                }
+
+                Log.d(TAG, "截图完成，耗时: " + (System.currentTimeMillis() - startTime) + "ms");
+            } catch (SecurityException se) {
+                Log.e(TAG, "截图安全权限错误: " + se.getMessage(), se);
+                screenshotFailCount++;
+                updateScreenshotStatusUI(true, "权限错误 (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+
+                // 请求新的权限
+                requestScreenCapturePermission();
+                return null;
+            } catch (Exception e) {
+                Log.e(TAG, "创建VirtualDisplay或获取图像时出错: " + e.getMessage(), e);
+                screenshotFailCount++;
+                updateScreenshotStatusUI(true, "截图出错 (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+                return null;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "截图过程中出错: " + e.getMessage(), e);
+            screenshotFailCount++;
+            updateScreenshotStatusUI(true, "截图失败 (" + screenshotFailCount + "/" + MAX_SCREENSHOT_RETRY + ")");
+            return null;
+        } finally {
+            // 在函数返回前释放资源
+            if (localVirtualDisplay != null) {
+                localVirtualDisplay.release();
+            }
+            if (localImageReader != null) {
+                localImageReader.close();
+            }
+            if (localMediaProjection != null) {
+                localMediaProjection.stop();
+            }
+        }
+
+        return bitmap;
     }
 
-    // 请求屏幕捕获权限
-    private void requestScreenCapturePermission() {
-        Log.d(TAG, "需要请求屏幕捕获权限，请在MainActivity中启动权限请求");
-        // 通知MainActivity请求权限
-        Intent intent = new Intent("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION");
-        sendBroadcast(intent);
-    }
-
-    // 释放屏幕捕获资源
+    // 释放MediaProjection相关资源，包括所有创建的对象
     private void releaseMediaProjection() {
         try {
             Log.d(TAG, "正在释放MediaProjection资源");
+
+            // 释放VirtualDisplay
             if (virtualDisplay != null) {
                 virtualDisplay.release();
                 virtualDisplay = null;
             }
+
+            // 释放ImageReader
             if (imageReader != null) {
                 imageReader.close();
                 imageReader = null;
             }
+
+            // 释放MediaProjection
             if (mediaProjection != null) {
                 mediaProjection.stop();
                 mediaProjection = null;
             }
+
+            // 释放Handler和Looper
             if (screenshotHandler != null && screenshotHandler.getLooper() != null) {
                 screenshotHandler.getLooper().quit();
                 screenshotHandler = null;
             }
+
+            // 释放Bitmap
             if (lastScreenshot != null) {
                 lastScreenshot.recycle();
                 lastScreenshot = null;
             }
-            mediaProjectionInitialized = false;
+
+            isMediaProjectionInitialized = false;
+            Log.d(TAG, "MediaProjection资源已完全释放");
+        } catch (Exception e) {
+            Log.e(TAG, "释放MediaProjection资源时出错: " + e.getMessage(), e);
+        }
+    }
+
+    // 只释放MediaProjection资源，保留其他
+    private void releaseMediaProjectionResources() {
+        try {
+            Log.d(TAG, "正在释放MediaProjection资源");
+            if (mediaProjection != null) {
+                mediaProjection.stop();
+                mediaProjection = null;
+            }
+            isMediaProjectionInitialized = false;
             Log.d(TAG, "MediaProjection资源已释放");
         } catch (Exception e) {
             Log.e(TAG, "释放MediaProjection资源时出错: " + e.getMessage(), e);
+        }
+    }
+
+    // 请求屏幕捕获权限
+    private void requestScreenCapturePermission() {
+        try {
+            // 广播请求
+            Intent intent = new Intent(ACTION_REQUEST_SCREENSHOT_PERMISSION);
+            intent.setPackage(getPackageName());
+            sendBroadcast(intent);
+            Log.d(TAG, "需要请求屏幕捕获权限，请在MainActivity中启动权限请求");
+
+            // 使用交互提示
+            Toast.makeText(this, "需要截屏权限，请点击授权", Toast.LENGTH_LONG).show();
+
+            // 如果已经在托管，显示等待提示
+            if (isHosting) {
+                updateScreenshotStatusUI(true, "等待用户授权中...");
+            }
+
+            // 额外的保险措施：尝试直接启动MainActivity
+            try {
+                Intent activityIntent = new Intent(this, MainActivity.class);
+                activityIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activityIntent.putExtra("action", "requestScreenshotPermission");
+                startActivity(activityIntent);
+            } catch (Exception e) {
+                Log.e(TAG, "无法启动主活动请求权限: " + e.getMessage());
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "请求截屏权限失败: " + e.getMessage(), e);
         }
     }
 
@@ -1387,180 +1709,403 @@ public class FloatingWindowService extends Service {
         return System.currentTimeMillis() + 60000;
     }
 
-    // 接收MediaProjection权限结果
-    public void setMediaProjectionResult(Intent data) {
-        Log.d(TAG, "收到MediaProjection权限结果");
-        this.resultData = data;
-        // 初始化媒体投影
-        initMediaProjection(data);
-
-        // 如果当前正在托管，重新开始托管任务以使用新的权限
-        if (isHosting && hostingHandler != null) {
-            Log.d(TAG, "托管任务已在运行，将使用新授权的截屏能力");
-        }
-    }
-
-    // 初始化屏幕捕获
+    // 初始化媒体投影参数和权限
+    // 注意：MediaProjection权限具有一定的时效性，超过一定时间后可能需要重新获取
+    // 权限数据由MainActivity保存和加载，该Service可以使用保存的权限直到它过期
     private void initMediaProjection(Intent data) {
-        if (data == null) {
-            Log.e(TAG, "初始化MediaProjection失败：数据为空");
-            return;
-        }
-
         try {
+            if (data == null) {
+                Log.e(TAG, "初始化MediaProjection失败: 数据为空");
+                Toast.makeText(this, "截屏权限未获取", Toast.LENGTH_SHORT).show();
+                isMediaProjectionInitialized = false;
+                return;
+            }
+
             Log.d(TAG, "开始初始化MediaProjection");
-            // 释放旧的资源
+
+            // 先释放之前的资源
             releaseMediaProjection();
 
-            // 获取屏幕信息
-            DisplayMetrics metrics = new DisplayMetrics();
-            WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-            windowManager.getDefaultDisplay().getMetrics(metrics);
-            screenDensity = metrics.densityDpi;
-            screenWidth = metrics.widthPixels;
-            screenHeight = metrics.heightPixels;
+            // 保存权限数据，用于后续创建MediaProjection实例
+            this.resultData = data;
 
-            // 创建ImageReader来接收屏幕图像
-            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
-            imageReader.setOnImageAvailableListener(reader -> {
-                try {
-                    Image image = reader.acquireLatestImage();
-                    if (image != null) {
-                        try {
-                            // 转换为Bitmap
-                            Bitmap bitmap = imageToBitmap(image);
-                            if (bitmap != null) {
-                                // 保存最后一次截图
-                                if (lastScreenshot != null) {
-                                    lastScreenshot.recycle();
-                                }
-                                lastScreenshot = bitmap;
-                            }
-                        } finally {
-                            image.close();
-                        }
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "处理截图失败: " + e.getMessage(), e);
-                }
-            }, null);
+            // 设置屏幕参数
+            screenDensity = getResources().getDisplayMetrics().densityDpi;
+            Display display = ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
+            Point size = new Point();
+            display.getRealSize(size);
+            screenWidth = size.x;
+            screenHeight = size.y;
 
-            // 创建MediaProjection
+            // 创建MediaProjection实例
             MediaProjectionManager projectionManager = (MediaProjectionManager) getSystemService(
                     Context.MEDIA_PROJECTION_SERVICE);
-            mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, data);
 
-            if (mediaProjection == null) {
-                Log.e(TAG, "无法创建MediaProjection实例");
+            try {
+                // 创建新的MediaProjection实例
+                mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, data);
+
+                if (mediaProjection == null) {
+                    Log.e(TAG, "无法获取MediaProjection，请确保用户已授权");
+                    Toast.makeText(this, "无法获取截屏权限", Toast.LENGTH_SHORT).show();
+                    isMediaProjectionInitialized = false;
+                    return;
+                }
+
+                // 注册回调监听投影状态
+                mediaProjection.registerCallback(new MediaProjection.Callback() {
+                    @Override
+                    public void onStop() {
+                        Log.d(TAG, "MediaProjection已停止");
+                        isMediaProjectionInitialized = false;
+                        mediaProjection = null;
+                    }
+                }, new Handler(Looper.getMainLooper()));
+
+                // 将MediaProjection标记为已初始化
+                isMediaProjectionInitialized = true;
+
+                // 设置第二个标志位也为true，确保一致性
+                mediaProjectionInitialized = true;
+
+                Log.i(TAG,
+                        "MediaProjection初始化成功: 屏幕分辨率 " + screenWidth + "x" + screenHeight + ", 密度: " + screenDensity);
+
+                // 重置截图失败计数
+                screenshotFailCount = 0;
+            } catch (Exception e) {
+                Log.e(TAG, "创建MediaProjection失败: " + e.getMessage(), e);
+                isMediaProjectionInitialized = false;
                 mediaProjectionInitialized = false;
+                Toast.makeText(this, "截屏权限初始化失败", Toast.LENGTH_SHORT).show();
                 return;
             }
-
-            // 创建VirtualDisplay
-            virtualDisplay = mediaProjection.createVirtualDisplay(
-                    "ScreenCapture",
-                    screenWidth,
-                    screenHeight,
-                    screenDensity,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    imageReader.getSurface(),
-                    null,
-                    null);
-
-            if (virtualDisplay == null) {
-                Log.e(TAG, "无法创建VirtualDisplay");
-                releaseMediaProjection();
-                mediaProjectionInitialized = false;
-                return;
-            }
-
-            Log.i(TAG, "MediaProjection初始化成功，屏幕尺寸: " + screenWidth + "x" + screenHeight);
-            mediaProjectionInitialized = true;
         } catch (Exception e) {
             Log.e(TAG, "初始化MediaProjection失败: " + e.getMessage(), e);
-            releaseMediaProjection();
+            Toast.makeText(this, "截屏功能初始化错误", Toast.LENGTH_SHORT).show();
+            isMediaProjectionInitialized = false;
             mediaProjectionInitialized = false;
         }
     }
 
-    // 停止托管
-    private void stopHosting() {
-        if (!isHosting) {
+    // 接收MediaProjection权限结果
+    public void setMediaProjectionResult(Intent data) {
+        if (data == null) {
+            Log.e(TAG, "收到空的MediaProjection数据");
             return;
         }
 
-        isHosting = false;
+        try {
+            this.resultData = data;
+            Log.d(TAG, "收到MediaProjection权限数据");
 
-        // 停止截图定时任务
-        if (hostingHandler != null) {
-            hostingHandler.removeCallbacksAndMessages(null);
-        }
+            // 确保在主线程中执行
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    // 尝试更新前台服务类型
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        try {
+                            // 只使用MEDIA_PROJECTION类型，避免使用SPECIAL_USE类型导致的权限问题
+                            int serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+                            updateForegroundServiceType(serviceType);
+                            Log.d(TAG, "已更新前台服务类型为MEDIA_PROJECTION");
 
-        // 隐藏取消托管按钮
-        if (cancelHostingView != null) {
-            try {
-                if (cancelHostingView.isShown()) {
-                    windowManager.removeView(cancelHostingView);
+                            // 延迟初始化，确保前台服务类型已生效
+                            new Handler().postDelayed(() -> {
+                                try {
+                                    initMediaProjection(data);
+                                    showScreenshotPermissionGrantedUI();
+                                } catch (Exception e) {
+                                    Log.e(TAG, "初始化MediaProjection失败: " + e.getMessage(), e);
+                                    Toast.makeText(this, "截屏功能初始化失败", Toast.LENGTH_SHORT).show();
+                                }
+                            }, 500);
+                        } catch (Exception e) {
+                            Log.e(TAG, "更新前台服务类型失败: " + e.getMessage(), e);
+                            // 尝试直接初始化，可能会因缺少权限而失败
+                            try {
+                                initMediaProjection(data);
+                                showScreenshotPermissionGrantedUI();
+                            } catch (Exception ex) {
+                                Log.e(TAG, "初始化MediaProjection失败: " + ex.getMessage(), ex);
+                                Toast.makeText(this, "截屏功能初始化失败，请检查权限设置", Toast.LENGTH_SHORT).show();
+                            }
+                        }
+                    } else {
+                        // Android 9及以下没有前台服务类型限制
+                        Log.d(TAG, "Android 9及以下，直接初始化MediaProjection");
+                        initMediaProjection(data);
+                        showScreenshotPermissionGrantedUI();
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "设置MediaProjection权限时发生错误: " + e.getMessage(), e);
+                    Toast.makeText(this, "截屏权限设置失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "移除取消托管按钮时出错", e);
-            }
-            cancelHostingView = null;
+            });
+        } catch (Exception e) {
+            Log.e(TAG, "处理MediaProjection结果异常: " + e.getMessage(), e);
+            Toast.makeText(this, "截屏初始化错误", Toast.LENGTH_SHORT).show();
         }
+    }
 
-        // 显示悬浮窗
-        if (floatingView != null && !floatingView.isShown()) {
-            try {
-                WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                        WindowManager.LayoutParams.WRAP_CONTENT,
-                        WindowManager.LayoutParams.WRAP_CONTENT,
-                        getWindowLayoutType(),
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                        PixelFormat.TRANSLUCENT);
-                params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
-                params.x = 0;
-                params.y = 0;
-                windowManager.addView(floatingView, params);
-            } catch (Exception e) {
-                // 视图可能已经添加
-                Log.e(TAG, "添加悬浮窗时出错", e);
-            }
+    private void showScreenshotPermissionGrantedUI() {
+        Toast.makeText(this, "截屏权限已获取，开始监控", Toast.LENGTH_SHORT).show();
+
+        // 显示取消按钮
+        if (cancelHostingView != null && cancelHostingView.getVisibility() != View.VISIBLE) {
+            cancelHostingView.setVisibility(View.VISIBLE);
         }
+    }
 
-        Toast.makeText(this, "已停止托管支付码", Toast.LENGTH_SHORT).show();
+    @RequiresApi(api = Build.VERSION_CODES.Q)
+    private void updateForegroundServiceType(int serviceType) {
+        try {
+            Log.d(TAG, "更新前台服务类型为: " + serviceType);
+
+            // 更新通知，确保服务类型变更生效
+            Notification notification = createNotification();
+            startForeground(NOTIFICATION_ID, notification, serviceType);
+            Log.d(TAG, "前台服务类型已更新");
+        } catch (Exception e) {
+            Log.e(TAG, "更新前台服务类型时出错: " + e.getMessage(), e);
+        }
+    }
+
+    // 开始截图任务
+    private void startScreenshotTask() {
+        if (mediaProjectionInitialized && mediaProjection != null && screenshotHandler != null) {
+            screenshotHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (!mediaProjectionInitialized || mediaProjection == null) {
+                        Log.d(TAG, "MediaProjection已失效，停止截图任务");
+                        return;
+                    }
+
+                    try {
+                        // 每次截图前先创建新的ImageReader
+                        if (imageReader != null) {
+                            imageReader.close();
+                        }
+                        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+
+                        // 先设置监听器，再创建虚拟显示（顺序很重要）
+                        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                        final Bitmap[] capturedBitmap = new Bitmap[1];
+
+                        imageReader.setOnImageAvailableListener(reader -> {
+                            try {
+                                Image image = reader.acquireLatestImage();
+                                if (image != null) {
+                                    try {
+                                        // 转换为Bitmap
+                                        capturedBitmap[0] = imageToBitmap(image);
+                                    } finally {
+                                        image.close();
+                                        // 通知已获取图像
+                                        latch.countDown();
+                                    }
+                                } else {
+                                    latch.countDown();
+                                }
+                            } catch (Exception e) {
+                                Log.e(TAG, "处理截图失败: " + e.getMessage(), e);
+                                latch.countDown();
+                            }
+                        }, screenshotHandler);
+
+                        // 每次截图前创建新的VirtualDisplay
+                        if (virtualDisplay != null) {
+                            virtualDisplay.release();
+                            virtualDisplay = null;
+                        }
+
+                        try {
+                            // 创建虚拟显示
+                            virtualDisplay = mediaProjection.createVirtualDisplay(
+                                    "ScreenCapture",
+                                    screenWidth,
+                                    screenHeight,
+                                    screenDensity,
+                                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                                    imageReader.getSurface(),
+                                    null,
+                                    screenshotHandler);
+
+                            if (virtualDisplay == null) {
+                                Log.e(TAG, "无法创建VirtualDisplay");
+                                latch.countDown();
+                                return;
+                            }
+
+                            // 等待图像可用，最多3秒
+                            boolean success = latch.await(3, java.util.concurrent.TimeUnit.SECONDS);
+                            if (!success) {
+                                Log.w(TAG, "等待截图超时");
+                            }
+
+                            // 获取截图
+                            if (capturedBitmap[0] != null) {
+                                // 更新最后截图
+                                if (lastScreenshot != null) {
+                                    lastScreenshot.recycle();
+                                }
+                                lastScreenshot = capturedBitmap[0];
+
+                                Log.d(TAG, "截图成功: " + lastScreenshot.getWidth() + "x" + lastScreenshot.getHeight());
+
+                                // 如果正在托管，直接处理截图
+                                if (isHosting) {
+                                    Bitmap copy = lastScreenshot.copy(lastScreenshot.getConfig(), true);
+                                    new Handler(Looper.getMainLooper()).post(() -> {
+                                        processScreenshot(copy);
+                                    });
+                                } else {
+                                    // 保存到文件作为测试
+                                    saveScreenshotToFile(lastScreenshot);
+                                }
+                            } else {
+                                Log.e(TAG, "未能获取截图");
+                            }
+                        } catch (SecurityException se) {
+                            Log.e(TAG, "创建虚拟显示时出现安全异常: " + se.getMessage(), se);
+                            Toast.makeText(FloatingWindowService.this, "截屏权限被拒绝，请重新授权", Toast.LENGTH_LONG).show();
+                            mediaProjectionInitialized = false;
+                            latch.countDown();
+                            if (imageReader != null) {
+                                imageReader.close();
+                                imageReader = null;
+                            }
+                            return;
+                        } catch (Exception e) {
+                            Log.e(TAG, "创建虚拟显示时发生异常: " + e.getMessage(), e);
+                            latch.countDown();
+                            if (imageReader != null) {
+                                imageReader.close();
+                                imageReader = null;
+                            }
+                            return;
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "截图过程中出错: " + e.getMessage(), e);
+                    } finally {
+                        // 释放虚拟显示和图像读取器
+                        try {
+                            if (virtualDisplay != null) {
+                                virtualDisplay.release();
+                                virtualDisplay = null;
+                            }
+
+                            if (imageReader != null) {
+                                imageReader.close();
+                                imageReader = null;
+                            }
+                        } catch (Exception e) {
+                            Log.e(TAG, "释放资源出错: " + e.getMessage());
+                        }
+                    }
+
+                    // 安排下一次截图
+                    if (mediaProjectionInitialized && mediaProjection != null) {
+                        screenshotHandler.postDelayed(this, 2000); // 每2秒截图一次
+                    }
+                }
+            }, 1000); // 初始延迟1秒
+        } else {
+            Log.w(TAG, "无法启动截图任务，MediaProjection未正确初始化");
+        }
+    }
+
+    /**
+     * 将截图保存到文件
+     * 
+     * @param screenshot 要保存的截图
+     */
+    private void saveScreenshotToFile(Bitmap screenshot) {
+        try {
+            // 创建目录（如果不存在）
+            File screenshotDir = new File(getExternalFilesDir(null), "screenshot");
+            if (!screenshotDir.exists()) {
+                if (!screenshotDir.mkdirs()) {
+                    Log.e(TAG, "无法创建screenshot目录");
+                    return;
+                }
+            }
+
+            // 使用当前时间创建文件名
+            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault());
+            String timestamp = dateFormat.format(new Date());
+            String fileName = "screenshot_" + timestamp + ".jpg";
+            File outputFile = new File(screenshotDir, fileName);
+
+            // 保存图片到文件
+            FileOutputStream fos = new FileOutputStream(outputFile);
+            screenshot.compress(Bitmap.CompressFormat.JPEG, 90, fos);
+            fos.flush();
+            fos.close();
+
+            Log.i(TAG, "截图已保存: " + outputFile.getAbsolutePath());
+        } catch (Exception e) {
+            Log.e(TAG, "保存截图失败: " + e.getMessage(), e);
+        }
+    }
+
+    // 添加一个方法，用于显示截图失败状态
+    private void updateScreenshotStatusUI(boolean isError, String message) {
+        try {
+            // 在主线程中更新UI
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    // 如果取消托管按钮可见，显示状态信息
+                    if (cancelHostingView != null && cancelHostingView.getVisibility() == View.VISIBLE) {
+                        // 尝试找到状态文本控件
+                        View statusTextView = cancelHostingView.findViewById(R.id.status_text);
+                        if (statusTextView instanceof TextView) {
+                            TextView textView = (TextView) statusTextView;
+
+                            // 设置文本
+                            textView.setText(message);
+
+                            // 如果是错误状态，设置红色
+                            if (isError) {
+                                textView.setTextColor(Color.RED);
+                            } else {
+                                textView.setTextColor(Color.WHITE);
+                            }
+
+                            // 确保可见
+                            textView.setVisibility(View.VISIBLE);
+                        } else {
+                            // 如果找不到现有的状态文本，创建一个临时的Toast
+                            Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+                        }
+                    } else {
+                        // 如果取消按钮不可见，用Toast显示
+                        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "更新UI状态时出错: " + e.getMessage(), e);
+                }
+            });
+        } catch (Exception e) {
+            Log.e(TAG, "调用UI更新方法失败: " + e.getMessage(), e);
+        }
     }
 
     // 将Image转换为Bitmap
     private Bitmap imageToBitmap(Image image) {
-        if (image == null) {
-            return null;
-        }
-
-        Image.Plane[] planes = image.getPlanes();
-        if (planes.length == 0) {
-            return null;
-        }
-
-        ByteBuffer buffer = planes[0].getBuffer();
-        int pixelStride = planes[0].getPixelStride();
-        int rowStride = planes[0].getRowStride();
+        Log.d(TAG, "图像尺寸: " + image.getWidth() + "x" + image.getHeight());
+        Image.Plane plane = image.getPlanes()[0];
+        ByteBuffer buffer = plane.getBuffer();
+        int pixelStride = plane.getPixelStride();
+        int rowStride = plane.getRowStride();
         int rowPadding = rowStride - pixelStride * image.getWidth();
 
-        // 创建Bitmap
         Bitmap bitmap = Bitmap.createBitmap(
                 image.getWidth() + rowPadding / pixelStride,
                 image.getHeight(),
                 Bitmap.Config.ARGB_8888);
         bitmap.copyPixelsFromBuffer(buffer);
-
-        // 如果有padding，裁剪为正确的尺寸
-        if (rowPadding > 0) {
-            Bitmap croppedBitmap = Bitmap.createBitmap(
-                    bitmap, 0, 0, image.getWidth(), image.getHeight());
-            bitmap.recycle();
-            return croppedBitmap;
-        }
-
-        return bitmap;
+        return Bitmap.createBitmap(bitmap, 0, 0, image.getWidth(), image.getHeight());
     }
 }
