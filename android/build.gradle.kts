@@ -2,6 +2,12 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        maven {
+            url = uri("https://javacv.scijava.org/")
+        }
+        maven {
+            url = uri("https://packagecloud.io/bytedeco/javacpp/maven2/")
+        }
     }
 }
 

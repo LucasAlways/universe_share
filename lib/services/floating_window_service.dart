@@ -9,6 +9,7 @@ class FloatingWindowService {
   // 启动悬浮窗服务
   static Future<bool> startFloatingWindow() async {
     try {
+      print("启动悬浮窗服务");
       final bool result = await _channel.invokeMethod('startFloatingWindow');
       return result;
     } on PlatformException catch (e) {
