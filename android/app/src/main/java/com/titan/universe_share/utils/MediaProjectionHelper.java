@@ -1,4 +1,4 @@
-package com.magicianguo.mediaprojectiondemo.util;
+package com.titan.universe_share.utils;
 
 import android.app.Activity;
 import android.content.Context;
@@ -7,8 +7,10 @@ import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 
 import com.magicianguo.mediaprojectiondemo.App;
-import com.magicianguo.mediaprojectiondemo.constant.RequestCode;
-import com.magicianguo.mediaprojectiondemo.service.MediaProjectionService;
+
+
+import com.titan.universe_share.constant.RequestCode;
+import com.titan.universe_share.service.MediaProjectionService;
 
 public class MediaProjectionHelper {
     private static final MediaProjectionManager MEDIA_PROJECTION_MANAGER = (MediaProjectionManager) App.getApp().getSystemService(Context.MEDIA_PROJECTION_SERVICE);

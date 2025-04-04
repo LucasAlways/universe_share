@@ -1,4 +1,4 @@
-package com.magicianguo.mediaprojectiondemo.service;
+package com.titan.universe_share.service;
 
 import android.app.Service;
 import android.content.Intent;
@@ -18,13 +18,13 @@ import android.view.Surface;
 
 import androidx.annotation.Nullable;
 
-import com.magicianguo.mediaprojectiondemo.App;
-import com.magicianguo.mediaprojectiondemo.constant.ServiceType;
-import com.magicianguo.mediaprojectiondemo.util.MediaProjectionHelper;
-import com.magicianguo.mediaprojectiondemo.util.NotificationHelper;
-import com.magicianguo.mediaprojectiondemo.util.ToastUtils;
-import com.magicianguo.mediaprojectiondemo.util.WindowHelper;
-import com.magicianguo.mediaprojectiondemo.view.ProjectionView;
+import com.titan.universe_share.App;
+import com.titan.universe_share.constant.ServiceType;
+import com.titan.universe_share.utils.MediaProjectionHelper;
+import com.titan.universe_share.utils.NotificationHelper;
+import com.titan.universe_share.utils.ToastUtils;
+import com.titan.universe_share.utils.WindowHelper;
+import com.titan.universe_share.views.ProjectionView;
 
 import java.io.BufferedOutputStream;
 import java.io.File;

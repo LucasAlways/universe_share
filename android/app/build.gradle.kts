@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.titan.universe_share"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 35  // 从34更新到35
     // ndkVersion = flutter.ndkVersion
     ndkVersion = "27.0.12077973"
 
@@ -47,6 +47,7 @@ flutter {
 // 添加自定义的 Maven 仓库配置
 repositories {
     mavenCentral()
+    google()
     // 添加 OpenPnp Maven 仓库，它有 OpenCV4Android
     maven {
         url = uri("https://javacv.scijava.org/")
@@ -58,8 +59,12 @@ repositories {
 }
 
 dependencies {
-    // 移除OpenCV远程依赖，我们已经有了纯Java实现
-    // implementation("org.opencv:opencv-android:4.7.0")
+    // 添加AndroidX核心库
+    implementation("androidx.core:core:1.12.0")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    
+    // 媒体相关依赖
+    implementation("androidx.media:media:1.7.0")
     
     // ML Kit 文本识别和条码扫描
     implementation("com.google.mlkit:text-recognition:16.0.0")

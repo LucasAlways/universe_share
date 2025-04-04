@@ -7,6 +7,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Toast;
 import android.content.BroadcastReceiver;
@@ -29,11 +30,13 @@ public class MainActivity extends FlutterActivity {
     private static final String CHANNEL = "com.universe_share/floating_window";
     private static final int REQUEST_CODE_OVERLAY_PERMISSION = 1234;
     private static final int REQUEST_CODE_MEDIA_PROJECTION = 5678;
+    private static final int REQUEST_ACCESSIBILITY_SETTINGS = 2;
     private MethodChannel.Result pendingResult;
     private BroadcastReceiver permissionRequestReceiver;
     private static final String TAG = "MainActivity";
     private boolean mediaProjectionRequested = false;
     private Intent resultData; // 保存用户授予的MediaProjection权限
+    private static Intent mediaProjectionResultData = null;
 
     @Override
     public void configureFlutterEngine(@NonNull FlutterEngine flutterEngine) {
@@ -61,6 +64,18 @@ public class MainActivity extends FlutterActivity {
                             requestMediaProjectionPermission();
                             result.success(true);
                             break;
+                        case "startFloatingService":
+                            startFloatingService();
+                            result.success(true);
+                            break;
+                        case "checkAccessibilityService":
+                            boolean enabled = isAccessibilityServiceEnabled();
+                            result.success(enabled);
+                            break;
+                        case "openAccessibilitySettings":
+                            openAccessibilitySettings();
+                            result.success(true);
+                            break;
                         default:
                             result.notImplemented();
                             break;
@@ -84,6 +99,29 @@ public class MainActivity extends FlutterActivity {
         } else {
             Log.d(TAG, "未找到有效的授权数据，需要重新申请权限");
         }
+
+        // 检查是否需要请求屏幕录制权限
+        Intent intent = getIntent();
+        if (intent != null && "requestScreenshotPermission".equals(intent.getStringExtra("action"))) {
+            requestMediaProjectionPermission();
+        }
+
+        // 在应用启动时检查辅助功能服务是否启用
+        if (!isAccessibilityServiceEnabled()) {
+            // 提示用户启用辅助功能服务
+            Toast.makeText(this, "请启用辅助功能服务以支持自动截图功能", Toast.LENGTH_LONG).show();
+
+            // 可以选择自动打开辅助功能设置页面
+            // openAccessibilitySettings();
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (intent != null && "requestScreenshotPermission".equals(intent.getStringExtra("action"))) {
+            requestMediaProjectionPermission();
+        }
     }
 
     @Override
@@ -100,6 +138,7 @@ public class MainActivity extends FlutterActivity {
     }
 
     private void startFloatingWindow(MethodChannel.Result result) {
+        // 检查是否有悬浮窗权限
         if (!checkOverlayPermission()) {
             if (result != null) {
                 result.error("PERMISSION_DENIED", "没有悬浮窗权限", null);
@@ -131,23 +170,16 @@ public class MainActivity extends FlutterActivity {
                         result.success(true);
                     }
 
-                    // 如果已经有截屏权限，重新传递给服务
+                    // 先退出到桌面
                     if (mediaProjectionRequested && resultData != null) {
                         Log.d(TAG, "传递保存的MediaProjection权限");
-                        new Handler().postDelayed(() -> sendMediaProjectionResult(resultData), 1000);
+                        sendMediaProjectionResult(resultData);
+                        exitToHome();
                     } else {
                         // 如果还没请求过截屏权限，主动请求
-                        new Handler().postDelayed(this::requestMediaProjectionPermission, 1000);
+                        requestMediaProjectionPermission();
                     }
 
-                    // 添加短暂延迟确保服务已启动
-                    new Handler().postDelayed(() -> {
-                        // 退出到桌面
-                        Intent homeIntent = new Intent(Intent.ACTION_MAIN);
-                        homeIntent.addCategory(Intent.CATEGORY_HOME);
-                        homeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(homeIntent);
-                    }, 2000);
                 } catch (Exception e) {
                     Log.e(TAG, "启动悬浮窗服务失败: " + e.getMessage(), e);
                     if (result != null) {
@@ -262,6 +294,7 @@ public class MainActivity extends FlutterActivity {
             // 注册广播接收器，使用正确的导出标志
             IntentFilter filter = new IntentFilter("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION");
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // 确保使用 RECEIVER_NOT_EXPORTED 标志
                 registerReceiver(permissionRequestReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
             } else {
                 registerReceiver(permissionRequestReceiver, filter);
@@ -295,7 +328,7 @@ public class MainActivity extends FlutterActivity {
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQUEST_CODE_OVERLAY_PERMISSION) {
             // 检查权限是否已授予
             boolean hasPermission = false;
@@ -314,29 +347,32 @@ public class MainActivity extends FlutterActivity {
             }
             return;
         } else if (requestCode == REQUEST_CODE_MEDIA_PROJECTION) {
-            Log.d(TAG, "收到截屏权限结果: " + resultCode);
-            if (resultCode == RESULT_OK && data != null) {
-                Log.d(TAG, "用户同意截屏权限");
+            // MediaProjection不再使用，直接提示用户使用辅助功能服务
+            Log.d(TAG, "不再使用MediaProjection，改用辅助功能服务");
 
-                // 保存权限结果到内存以便本次会话使用
-                mediaProjectionRequested = true;
-                resultData = data;
+            // 提示用户启用辅助功能服务
+            Toast.makeText(this, "请启用辅助功能服务以使用自动截图功能", Toast.LENGTH_LONG).show();
 
-                // 直接发送到服务
-                sendMediaProjectionResult(data);
+            // 打开辅助功能设置
+            openAccessibilitySettings();
 
-                // 显示成功提示
-                Toast.makeText(this, "截屏权限获取成功，已保存授权", Toast.LENGTH_SHORT).show();
-            } else {
-                Log.e(TAG, "用户拒绝授予MediaProjection权限");
-                Toast.makeText(this, "截屏权限被拒绝，托管功能将使用备选模式", Toast.LENGTH_LONG).show();
-                mediaProjectionRequested = false;
-                resultData = null;
-
-                // 清除之前保存的权限数据
-                clearSavedMediaProjectionData();
+            // 更新UI
+            if (pendingResult != null) {
+                pendingResult.success(true);
+                pendingResult = null;
             }
+
             return;
+        } else if (requestCode == REQUEST_ACCESSIBILITY_SETTINGS) {
+            // 用户从辅助功能设置页面返回，检查是否已启用
+            if (isAccessibilityServiceEnabled()) {
+                Toast.makeText(this, "辅助功能服务已启用，可以开始使用截图功能", Toast.LENGTH_SHORT).show();
+
+                // 启动悬浮窗服务
+                startFloatingService();
+            } else {
+                Toast.makeText(this, "请启用辅助功能服务以支持自动截图功能", Toast.LENGTH_LONG).show();
+            }
         }
         super.onActivityResult(requestCode, resultCode, data);
     }
@@ -474,5 +510,48 @@ public class MainActivity extends FlutterActivity {
             Log.e(TAG, "Bundle反序列化失败: " + e.getMessage());
             return null;
         }
+    }
+
+    // 退出到桌面的方法
+    private void exitToHome() {
+        new Handler().postDelayed(() -> {
+            Intent homeIntent = new Intent(Intent.ACTION_MAIN);
+            homeIntent.addCategory(Intent.CATEGORY_HOME);
+            homeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(homeIntent);
+        }, 800); // 延迟0.8秒退出到桌面，可根据实际情况调整
+    }
+
+    private void startFloatingService() {
+        Intent intent = new Intent(this, FloatingWindowService.class);
+        startService(intent);
+
+        Toast.makeText(this, "悬浮窗服务已启动", Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * 检查辅助功能服务是否已启用
+     */
+    private boolean isAccessibilityServiceEnabled() {
+        String serviceName = getPackageName() + "/" + ScreenCaptureAccessibilityService.class.getCanonicalName();
+        String enabledServices = Settings.Secure.getString(getContentResolver(),
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+
+        if (enabledServices != null) {
+            return enabledServices.contains(serviceName);
+        }
+
+        return false;
+    }
+
+    /**
+     * 打开辅助功能设置页面
+     */
+    private void openAccessibilitySettings() {
+        Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivityForResult(intent, REQUEST_ACCESSIBILITY_SETTINGS);
+
+        Toast.makeText(this, "请在辅助功能中找到并启用\"宇宙分享截屏服务\"", Toast.LENGTH_LONG).show();
     }
 }

@@ -1,4 +1,4 @@
-package com.magicianguo.mediaprojectiondemo.constant;
+package com.titan.universe_share.constant;
 
 public interface ServiceType {
     int SCREENSHOT = 0;

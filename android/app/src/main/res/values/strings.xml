@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">宇宙分享</string>
+    <string name="accessibility_service_description">启用此服务可以让应用自动捕获屏幕内容，用于识别支付宝付款码和卡片信息，实现自动更新二维码功能。本应用不会收集任何个人信息或将数据发送至互联网。</string>
+</resources> 
