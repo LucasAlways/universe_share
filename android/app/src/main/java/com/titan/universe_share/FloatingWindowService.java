@@ -1,10 +1,12 @@
 package com.titan.universe_share;
 
+import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -30,9 +32,6 @@ import androidx.annotation.RequiresApi;
 import androidx.core.app.NotificationCompat;
 import android.content.pm.ServiceInfo;
 import android.util.Log;
-import android.view.animation.Animation;
-import android.view.animation.AnimationUtils;
-import android.view.animation.TranslateAnimation;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
 import android.os.Looper;
@@ -43,23 +42,20 @@ import android.media.projection.MediaProjectionManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.ImageReader;
 import android.media.Image;
-import android.graphics.ImageFormat;
-import android.graphics.Rect;
 import android.graphics.Point;
 import android.view.Display;
-import android.util.DisplayMetrics;
 import android.app.AlertDialog;
-import android.os.AsyncTask;
-import android.os.Bundle;
+
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+
+import com.titan.universe_share.activity.MainActivity;
+import com.titan.universe_share.service.MediaProjectionService;
+import com.titan.universe_share.utils.MediaProjectionHelper;
 import com.titan.universe_share.utils.PaymentTemplateManager;
-import android.graphics.BitmapFactory;
-import com.titan.universe_share.utils.ImageSimilarityUtils;
+
 import android.os.HandlerThread;
 import android.app.Activity;
 import android.os.Vibrator;
@@ -71,9 +67,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.Timer;
 import java.util.TimerTask;
 import android.view.Surface; // 添加Surface导入
-import android.content.BroadcastReceiver;
 import android.provider.Settings;
-import android.text.TextUtils;
 
 public class FloatingWindowService extends Service {
     private static final String TAG = "FloatingWindowService";
@@ -146,7 +140,9 @@ public class FloatingWindowService extends Service {
 
     // 广播Action
     public static final String ACTION_REQUEST_SCREENSHOT_PERMISSION = "com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION";
+    private static final String ACTION_MEDIA_PROJECTION_GRANTED = "com.titan.universe_share.MEDIA_PROJECTION_GRANTED";
     public static final String ACTION_SCREENSHOT_COMPLETED = "com.titan.universe_share.SCREENSHOT_COMPLETED";
+    private static final String ACTION_REQUEST_MEDIA_PROJECTION = "com.titan.universe_share.REQUEST_MEDIA_PROJECTION";
 
     // 在类的成员变量部分添加失败计数器
     private int screenshotFailCount = 0;
@@ -158,14 +154,57 @@ public class FloatingWindowService extends Service {
 
     // 在类的成员变量部分添加辅助功能服务相关字段
     private boolean useAccessibilityService = true; // 是否使用辅助功能服务进行截图
-    private ScreenCaptureAccessibilityService.HostingStatusListener accessibilityServiceListener;
 
+    private ScreenCaptureAccessibilityService.HostingStatusListener accessibilityServiceListener;
+    // mediaprojection注册广播器
+    private BroadcastReceiver projectionResultReceiver;
+    private BroadcastReceiver mediaProjectionGrantedReceiver;
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override
     public void onCreate() {
         super.onCreate();
 
         // 注册服务实例
         FloatingWindowServiceHolder.setService(this);
+        // 注册接收MediaProjection结果的广播接收器
+        projectionResultReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if ("com.titan.universe_share.MEDIA_PROJECTION_RESULT".equals(intent.getAction())) {
+                    int resultCode = intent.getIntExtra("resultCode", Activity.RESULT_CANCELED);
+                    Intent resultData = intent.getParcelableExtra("resultData");
+
+                    if (resultCode == Activity.RESULT_OK && resultData != null) {
+                        // 处理MediaProjection授权结果
+                        MediaProjectionService.resultCode = resultCode;
+                        MediaProjectionService.resultData = resultData;
+
+                        Log.d(TAG, "收到MediaProjection结果广播，准备启动MediaProjection服务");
+
+                        // 启动MediaProjection服务
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(
+                                    new Intent(FloatingWindowService.this, MediaProjectionService.class));
+                        } else {
+                            startService(new Intent(FloatingWindowService.this, MediaProjectionService.class));
+                        }
+                    }
+                }
+            }
+        };
+
+        // 根据Android版本选择不同的registerReceiver调用方式
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Android 12及以上需要指定RECEIVER_NOT_EXPORTED标志
+            registerReceiver(projectionResultReceiver,
+                    new IntentFilter("com.titan.universe_share.MEDIA_PROJECTION_RESULT"),
+                    Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            // 低版本Android继续使用原来的方法
+            registerReceiver(projectionResultReceiver,
+                    new IntentFilter("com.titan.universe_share.MEDIA_PROJECTION_RESULT"));
+        }
 
         // 不再需要注册截图完成广播接收器
         // registerScreenshotCompletedReceiver();
@@ -742,10 +781,37 @@ public class FloatingWindowService extends Service {
                         dialog.dismiss();
                         // 关闭展开视图
                         toggleExpandedView(params);
-                        // 开始托管操f作
-                        Toast.makeText(FloatingWindowService.this, "开始托管", Toast.LENGTH_SHORT).show();
-                        // 调用startHosting方法开始实际托管
-                        Log.d(TAG, "*********开始---托管*********");
+
+                        // 启动专用的轻量级活动来申请权限
+                        Intent intent = new Intent(FloatingWindowService.this,
+                                com.titan.universe_share.activity.MediaProjectionRequestActivity.class);
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(intent);
+                        Log.d(TAG, "启动MediaProjectionRequestActivity申请投影权限");
+
+                        // 注册广播接收器来接收权限授权结果
+                        mediaProjectionGrantedReceiver = new BroadcastReceiver() {
+                            @Override
+                            public void onReceive(Context context, Intent intent) {
+                                if (ACTION_MEDIA_PROJECTION_GRANTED.equals(intent.getAction())) {
+                                    // 权限授权成功，执行后续代码
+                                    Toast.makeText(FloatingWindowService.this, "开始托管，媒体投影权限已获取", Toast.LENGTH_SHORT)
+                                            .show();
+                                    // 调用startHosting方法开始实际托管
+                                    Log.d(TAG, "*********开始---托管*********");
+                                    startHosting();
+                                }
+                            }
+                        };
+                        IntentFilter filter = new IntentFilter(ACTION_MEDIA_PROJECTION_GRANTED);
+                        // 关键修复：根据API版本设置接收器导出标志
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            // Android 12+ 必须指定导出标志，这里表示不对外暴露
+                            registerReceiver(mediaProjectionGrantedReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                        } else {
+                            // 旧版本保持原有逻辑
+                            registerReceiver(mediaProjectionGrantedReceiver, filter);
+                        }
                         startHosting();
                     })
                     .setNegativeButton("关闭", (dialog, which) -> {
@@ -1024,6 +1090,16 @@ public class FloatingWindowService extends Service {
     public void onDestroy() {
         super.onDestroy();
 
+        // 注销广播接收器
+        if (mediaProjectionGrantedReceiver != null) {
+            try {
+                unregisterReceiver(mediaProjectionGrantedReceiver);
+                mediaProjectionGrantedReceiver = null;
+            } catch (Exception e) {
+                Log.e(TAG, "注销广播接收器失败: " + e.getMessage());
+            }
+        }
+
         // 清除服务实例
         FloatingWindowServiceHolder.setService(null);
 
@@ -1067,8 +1143,25 @@ public class FloatingWindowService extends Service {
             mediaProjection.stop();
             mediaProjection = null;
         }
+        // 取消注册广播接收器
+        unregisterReceiver(projectionResultReceiver);
+        if (mediaProjectionGrantedReceiver != null) {
+            try {
+                unregisterReceiver(mediaProjectionGrantedReceiver);
+                mediaProjectionGrantedReceiver = null;
+            } catch (Exception e) {
+                Log.e(TAG, "Service销毁时注销接收器出错", e);
+            }
+        }
 
         Log.d(TAG, "服务已销毁");
+    }
+
+    // 请求MediaProjection权限的方法
+    public void requestMediaProjection() {
+        Intent intent = new Intent("com.titan.universe_share.REQUEST_MEDIA_PROJECTION");
+        sendBroadcast(intent);
+        Log.d(TAG, "已发送MediaProjection权限请求广播");
     }
 
     // 处理截图，分析支付信息
@@ -1204,52 +1297,53 @@ public class FloatingWindowService extends Service {
             hostingHandler = new Handler(Looper.getMainLooper());
         }
 
-        // 检查是否可以使用辅助功能服务进行截图
-        if (isAccessibilityServiceEnabled()) {
-            // 使用辅助功能服务进行截图
-            Log.d(TAG, "使用辅助功能服务进行截图");
+//        // 检查是否可以使用辅助功能服务进行截图
+//        if (isAccessibilityServiceEnabled()) {
+//            // 使用辅助功能服务进行截图
+//            Log.d(TAG, "使用辅助功能服务进行截图");
+//
+//            // 初始化监听器
+//            initAccessibilityServiceListener();
+//
+//            // 获取辅助功能服务实例并开始托管
+//            ScreenCaptureAccessibilityService service = ScreenCaptureAccessibilityService.getInstance();
+//            if (service != null) {
+//                service.setHostingStatusListener(accessibilityServiceListener);
+//
+//                // 启动托管
+//                service.startHosting();
+//
+//                // 更新UI状态
+//                updateScreenshotStatusUI(false, "使用辅助功能服务进行截图");
+//            } else {
+//                // 无法获取服务实例，提示用户启用辅助功能
+//                Log.w(TAG, "无法获取辅助功能服务实例，请确保已启用辅助功能");
+//                updateScreenshotStatusUI(true, "请启用辅助功能服务");
+//
+//                // 弹出提示
+//                hostingHandler.post(() -> {
+//                    Toast.makeText(this, "请先启用辅助功能服务", Toast.LENGTH_LONG).show();
+//                    showAccessibilitySettingsDialog();
+//                });
+//
+//                // 停止托管
+//                stopHosting();
+//            }
+//        } else {
+//            // 无法使用辅助功能服务，提示用户启用
+//            Log.d(TAG, "辅助功能服务未启用，请用户启用");
+//            updateScreenshotStatusUI(true, "请启用辅助功能服务");
+//
+//            // 弹出提示
+//            hostingHandler.post(() -> {
+//                Toast.makeText(this, "请先启用辅助功能服务", Toast.LENGTH_LONG).show();
+//                showAccessibilitySettingsDialog();
+//            });
+//
+//            // 停止托管
+//            stopHosting();
+//        }
 
-            // 初始化监听器
-            initAccessibilityServiceListener();
-
-            // 获取辅助功能服务实例并开始托管
-            ScreenCaptureAccessibilityService service = ScreenCaptureAccessibilityService.getInstance();
-            if (service != null) {
-                service.setHostingStatusListener(accessibilityServiceListener);
-
-                // 启动托管
-                service.startHosting();
-
-                // 更新UI状态
-                updateScreenshotStatusUI(false, "使用辅助功能服务进行截图");
-            } else {
-                // 无法获取服务实例，提示用户启用辅助功能
-                Log.w(TAG, "无法获取辅助功能服务实例，请确保已启用辅助功能");
-                updateScreenshotStatusUI(true, "请启用辅助功能服务");
-
-                // 弹出提示
-                hostingHandler.post(() -> {
-                    Toast.makeText(this, "请先启用辅助功能服务", Toast.LENGTH_LONG).show();
-                    showAccessibilitySettingsDialog();
-                });
-
-                // 停止托管
-                stopHosting();
-            }
-        } else {
-            // 无法使用辅助功能服务，提示用户启用
-            Log.d(TAG, "辅助功能服务未启用，请用户启用");
-            updateScreenshotStatusUI(true, "请启用辅助功能服务");
-
-            // 弹出提示
-            hostingHandler.post(() -> {
-                Toast.makeText(this, "请先启用辅助功能服务", Toast.LENGTH_LONG).show();
-                showAccessibilitySettingsDialog();
-            });
-
-            // 停止托管
-            stopHosting();
-        }
     }
 
     /**

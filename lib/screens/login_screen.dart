@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/user_model.dart';
+import '../services/parse_service.dart';
 import './signup_screen.dart';
 import './home_screen.dart';
 
@@ -16,6 +17,25 @@ class _LoginScreenState extends State<LoginScreen> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _obscurePassword = true;
+  bool _showOfflineLoginHint = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 检查服务器连接状态，设置离线登录提示
+    _checkServerAndSetupOfflineLogin();
+  }
+
+  Future<void> _checkServerAndSetupOfflineLogin() async {
+    // 如果服务器不可用，自动填充离线账号信息
+    if (!ParseService.isServerAvailable) {
+      setState(() {
+        _showOfflineLoginHint = true;
+        _usernameController.text = 'admin1';
+        _passwordController.text = '123456';
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -84,6 +104,36 @@ class _LoginScreenState extends State<LoginScreen> {
                     style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 40),
+
+                  // 离线登录提示
+                  if (_showOfflineLoginHint)
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: Colors.yellow.shade100,
+                        border: Border.all(color: Colors.amber),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Column(
+                        children: [
+                          Text(
+                            '服务器连接失败',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.orange,
+                            ),
+                          ),
+                          SizedBox(height: 4),
+                          Text(
+                            '已自动填充离线账号信息，点击登录即可继续使用',
+                            style: TextStyle(fontSize: 13),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
+                    ),
+
                   TextFormField(
                     controller: _usernameController,
                     decoration: const InputDecoration(
@@ -143,16 +193,31 @@ class _LoginScreenState extends State<LoginScreen> {
                             : const Text('登录', style: TextStyle(fontSize: 16)),
                   ),
                   const SizedBox(height: 16),
-                  TextButton(
-                    onPressed: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (context) => const SignupScreen(),
+
+                  // 根据服务器状态决定是否展示注册按钮
+                  if (!_showOfflineLoginHint)
+                    TextButton(
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (context) => const SignupScreen(),
+                          ),
+                        );
+                      },
+                      child: const Text('没有账号？点击注册'),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Text(
+                        '服务器离线，暂时无法注册新账号',
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 13,
                         ),
-                      );
-                    },
-                    child: const Text('没有账号？点击注册'),
-                  ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
                 ],
               ),
             ),

@@ -26,12 +26,14 @@ import com.titan.universe_share.utils.PaymentTemplateManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 /**
  * 辅助功能服务，用于截取屏幕内容进行托管
@@ -133,24 +135,17 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
 
         // 配置服务
         AccessibilityServiceInfo info = new AccessibilityServiceInfo();
-        info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK;
+        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
-        info.notificationTimeout = 100;
+        info.flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
 
-        // 设置可获取窗口内容 (Android兼容性修改)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
-            info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
-            info.flags |= AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
-        }
-
-        // Android 11+ 添加截屏权限 (0x4 is FLAG_REQUEST_TAKE_SCREENSHOT)
-        if (Build.VERSION.SDK_INT >= 30) { // Build.VERSION_CODES.R
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                // 直接使用FLAG_REQUEST_TAKE_SCREENSHOT的值
-                info.flags |= 0x4; // 硬编码FLAG_REQUEST_TAKE_SCREENSHOT的值
-                Log.d(TAG, "已请求截屏权限 FLAG_REQUEST_TAKE_SCREENSHOT");
+                Field flagField = AccessibilityServiceInfo.class.getDeclaredField("FLAG_REQUEST_TAKE_SCREENSHOT");
+                int flagValue = (int) flagField.get(null);
+                info.flags |= flagValue;
             } catch (Exception e) {
-                Log.e(TAG, "设置截屏权限失败: " + e.getMessage());
+                Log.e(TAG, "Failed to set screenshot flag", e);
             }
         }
 
@@ -268,8 +263,7 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                 hostingStatusListener.onScreenshotTaken(true, "正在截图...");
             }
 
-            if (Build.VERSION.SDK_INT >= 30) { // Android 11 (R) API 30
-                // 使用Android 11的原生AccessibilityService截图
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 takeAccessibilityNativeScreenshot();
             } else {
                 Log.e(TAG, "设备Android版本过低，不支持AccessibilityService截图功能");
@@ -292,55 +286,57 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
     /**
      * 使用AccessibilityService原生截图API
      */
-    @RequiresApi(api = 30) // Build.VERSION_CODES.R
+    @RequiresApi(api = Build.VERSION_CODES.R)
     @SuppressLint("NewApi")
     private void takeAccessibilityNativeScreenshot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.e(TAG, "Native screenshot API requires Android 11 or higher");
+            return;
+        }
+
         try {
-            Log.d(TAG, "调用AccessibilityService原生截图API...");
+            Method takeScreenshotMethod = AccessibilityService.class.getMethod("takeScreenshot", int.class,
+                    Executor.class, TakeScreenshotCallback.class);
+            takeScreenshotMethod.invoke(this,
+                    Display.DEFAULT_DISPLAY,
+                    Executors.newSingleThreadExecutor(),
+                    new TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(ScreenshotResult result) {
+                            try {
+                                Method getHardwareBufferMethod = result.getClass().getMethod("getHardwareBuffer");
+                                Object buffer = getHardwareBufferMethod.invoke(result);
 
-            // 创建回调
-            AccessibilityService.TakeScreenshotCallback callback = new AccessibilityService.TakeScreenshotCallback() {
-                @Override
-                public void onSuccess(AccessibilityService.ScreenshotResult result) {
-                    try {
-                        Log.d(TAG, "原生截图成功");
+                                if (buffer != null) {
+                                    try {
+                                        Method getWidthMethod = buffer.getClass().getMethod("getWidth");
+                                        Method getHeightMethod = buffer.getClass().getMethod("getHeight");
+                                        int width = (int) getWidthMethod.invoke(buffer);
+                                        int height = (int) getHeightMethod.invoke(buffer);
 
-                        // 直接获取Bitmap
-                        Bitmap bitmap = result.getBitmap();
+                                        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                                        Method copyToBitmapMethod = buffer.getClass().getMethod("copyToBitmap",
+                                                Bitmap.class);
+                                        copyToBitmapMethod.invoke(buffer, bitmap);
 
-                        if (bitmap != null) {
-                            Log.d(TAG, "成功获取截图Bitmap: " + bitmap.getWidth() + "x" + bitmap.getHeight());
-
-                            // 创建副本以防止原始位图被回收
-                            Bitmap copy = bitmap.copy(Bitmap.Config.ARGB_8888, true);
-
-                            // 处理截图
-                            backgroundHandler.post(() -> handleScreenshotResult(copy));
-                        } else {
-                            Log.e(TAG, "截图Bitmap为空");
-                            scheduleNextScreenshot(DEFAULT_SCREENSHOT_INTERVAL);
+                                        processScreenshot(bitmap);
+                                    } finally {
+                                        Method closeMethod = buffer.getClass().getMethod("close");
+                                        closeMethod.invoke(buffer);
+                                    }
+                                }
+                            } catch (Exception e) {
+                                Log.e(TAG, "Failed to process screenshot", e);
+                            }
                         }
-                    } catch (Exception e) {
-                        Log.e(TAG, "处理截图结果失败: " + e.getMessage(), e);
-                        Log.e(TAG, "详细错误: ", e);
-                        scheduleNextScreenshot(DEFAULT_SCREENSHOT_INTERVAL);
-                    }
-                }
 
-                @Override
-                public void onFailure(int errorCode) {
-                    Log.e(TAG, "截图失败，错误码: " + errorCode);
-                    scheduleNextScreenshot(DEFAULT_SCREENSHOT_INTERVAL);
-                }
-            };
-
-            // 调用系统API进行截图
-            takeScreenshot(Display.DEFAULT_DISPLAY, getApplicationContext().getMainExecutor(), callback);
-            Log.d(TAG, "已请求系统进行截图，等待回调");
+                        @Override
+                        public void onFailure(int errorCode) {
+                            Log.e(TAG, "Failed to take screenshot, error code: " + errorCode);
+                        }
+                    });
         } catch (Exception e) {
-            Log.e(TAG, "请求截图失败: " + e.getMessage(), e);
-            Log.e(TAG, "详细错误: ", e);
-            scheduleNextScreenshot(DEFAULT_SCREENSHOT_INTERVAL);
+            Log.e(TAG, "Failed to take screenshot", e);
         }
     }
 

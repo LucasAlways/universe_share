@@ -1,5 +1,6 @@
-package com.titan.universe_share;
+package com.titan.universe_share.activity;
 
+import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
@@ -7,7 +8,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
-import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Toast;
 import android.content.BroadcastReceiver;
@@ -17,19 +17,24 @@ import android.media.projection.MediaProjectionManager;
 import android.content.SharedPreferences;
 import android.os.Parcel;
 import android.util.Base64;
-import android.graphics.Bitmap;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+
+import com.titan.universe_share.FloatingWindowService;
+import com.titan.universe_share.FloatingWindowServiceHolder;
+import com.titan.universe_share.ScreenCaptureAccessibilityService;
+import com.titan.universe_share.TitanApp;
+import com.titan.universe_share.constant.RequestCode;
+import com.titan.universe_share.utils.MediaProjectionHelper;
+
 import io.flutter.embedding.android.FlutterActivity;
 import io.flutter.embedding.engine.FlutterEngine;
 import io.flutter.plugin.common.MethodChannel;
-import io.flutter.plugins.GeneratedPluginRegistrant;
 
 public class MainActivity extends FlutterActivity {
     private static final String CHANNEL = "com.universe_share/floating_window";
     private static final int REQUEST_CODE_OVERLAY_PERMISSION = 1234;
-    private static final int REQUEST_CODE_MEDIA_PROJECTION = 5678;
     private static final int REQUEST_ACCESSIBILITY_SETTINGS = 2;
     private MethodChannel.Result pendingResult;
     private BroadcastReceiver permissionRequestReceiver;
@@ -37,6 +42,33 @@ public class MainActivity extends FlutterActivity {
     private boolean mediaProjectionRequested = false;
     private Intent resultData; // 保存用户授予的MediaProjection权限
     private static Intent mediaProjectionResultData = null;
+    private static final String ACTION_REQUEST_MEDIA_PROJECTION = "com.titan.universe_share.REQUEST_MEDIA_PROJECTION";
+    private static final String ACTION_MEDIA_PROJECTION_GRANTED = "com.titan.universe_share.MEDIA_PROJECTION_GRANTED";
+
+    private BroadcastReceiver projectionRequestReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (ACTION_REQUEST_MEDIA_PROJECTION.equals(intent.getAction())) {
+                Log.d(TAG, "接收到权限请求广播，调用 MediaProjectionHelper.start()");
+                // 收到Service的请求，调用start方法
+                MediaProjectionHelper.start(MainActivity.this);
+            }
+        }
+    };
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        TitanApp.setCurrentActivity(this);
+    }
+
+    @Override
+    protected void onPause() {
+        if (TitanApp.getCurrentActivity() == this) {
+            TitanApp.setCurrentActivity(null);
+        }
+        super.onPause();
+    }
 
     @Override
     public void configureFlutterEngine(@NonNull FlutterEngine flutterEngine) {
@@ -82,38 +114,42 @@ public class MainActivity extends FlutterActivity {
                     }
                 });
 
-        // 注册广播接收器以接收截屏权限请求
-        registerScreenCapturePermissionReceiver();
+        // todo:rep // 注册广播接收器以接收截屏权限请求
+        // registerScreenCapturePermissionReceiver();
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // 尝试加载保存的MediaProjection授权数据
-        Intent savedProjectionData = loadSavedMediaProjectionData();
-        if (savedProjectionData != null) {
-            Log.d(TAG, "已找到保存的MediaProjection授权数据");
-            resultData = savedProjectionData;
-            mediaProjectionRequested = true;
+        // todo:更换 // 尝试加载保存的MediaProjection授权数据
+        // Intent savedProjectionData = loadSavedMediaProjectionData();
+        // if (savedProjectionData != null) {
+        // Log.d(TAG, "已找到保存的MediaProjection授权数据");
+        // resultData = savedProjectionData;
+        // mediaProjectionRequested = true;
+        // } else {
+        // Log.d(TAG, "未找到有效的授权数据，需要重新申请权限");
+        // }
+        //
+        // // 检查是否需要请求屏幕录制权限
+        // Intent intent = getIntent();
+        // if (intent != null &&
+        // "requestScreenshotPermission".equals(intent.getStringExtra("action"))) {
+        // requestMediaProjectionPermission();
+        // }
+        //
+        // 注册广播接收器以接收截屏权限请求
+        // 注册广播接收器以接收截屏权限请求
+        IntentFilter filter = new IntentFilter(ACTION_REQUEST_MEDIA_PROJECTION);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // 确保使用 RECEIVER_NOT_EXPORTED 标志
+            registerReceiver(projectionRequestReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
-            Log.d(TAG, "未找到有效的授权数据，需要重新申请权限");
+            registerReceiver(projectionRequestReceiver, filter);
         }
 
-        // 检查是否需要请求屏幕录制权限
-        Intent intent = getIntent();
-        if (intent != null && "requestScreenshotPermission".equals(intent.getStringExtra("action"))) {
-            requestMediaProjectionPermission();
-        }
-
-        // 在应用启动时检查辅助功能服务是否启用
-        if (!isAccessibilityServiceEnabled()) {
-            // 提示用户启用辅助功能服务
-            Toast.makeText(this, "请启用辅助功能服务以支持自动截图功能", Toast.LENGTH_LONG).show();
-
-            // 可以选择自动打开辅助功能设置页面
-            // openAccessibilitySettings();
-        }
     }
 
     @Override
@@ -128,13 +164,14 @@ public class MainActivity extends FlutterActivity {
     protected void onDestroy() {
         super.onDestroy();
         // 注销广播接收器
-        if (permissionRequestReceiver != null) {
+        if (projectionRequestReceiver != null) {
             try {
-                unregisterReceiver(permissionRequestReceiver);
+                unregisterReceiver(projectionRequestReceiver);
             } catch (Exception e) {
                 Log.e(TAG, "注销广播接收器失败: " + e.getMessage());
             }
         }
+
     }
 
     private void startFloatingWindow(MethodChannel.Result result) {
@@ -171,14 +208,15 @@ public class MainActivity extends FlutterActivity {
                     }
 
                     // 先退出到桌面
-                    if (mediaProjectionRequested && resultData != null) {
-                        Log.d(TAG, "传递保存的MediaProjection权限");
-                        sendMediaProjectionResult(resultData);
-                        exitToHome();
-                    } else {
-                        // 如果还没请求过截屏权限，主动请求
-                        requestMediaProjectionPermission();
-                    }
+                    exitToHome();
+                    // TODO：去掉？ if (mediaProjectionRequested && resultData != null) {
+                    // Log.d(TAG, "传递保存的MediaProjection权限");
+                    // sendMediaProjectionResult(resultData);
+                    // exitToHome();
+                    // } else {
+                    // // 如果还没请求过截屏权限，主动请求
+                    // requestMediaProjectionPermission();
+                    // }
 
                 } catch (Exception e) {
                     Log.e(TAG, "启动悬浮窗服务失败: " + e.getMessage(), e);
@@ -235,7 +273,7 @@ public class MainActivity extends FlutterActivity {
             MediaProjectionManager projectionManager = (MediaProjectionManager) getSystemService(
                     Context.MEDIA_PROJECTION_SERVICE);
             Intent captureIntent = projectionManager.createScreenCaptureIntent();
-            startActivityForResult(captureIntent, REQUEST_CODE_MEDIA_PROJECTION);
+            startActivityForResult(captureIntent, RequestCode.START_MEDIA_PROJECTION);
 
             // 显示提示，告知用户需要给予权限
             Toast.makeText(this, "请授予屏幕录制权限以启用截图功能", Toast.LENGTH_LONG).show();
@@ -246,65 +284,67 @@ public class MainActivity extends FlutterActivity {
     }
 
     // 注册广播接收器，接收服务的权限请求
-    private void registerScreenCapturePermissionReceiver() {
-        try {
-            permissionRequestReceiver = new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    Log.d(TAG, "收到截屏权限请求广播");
-
-                    // 检查是否已有有效的权限数据
-                    if (mediaProjectionRequested && resultData != null) {
-                        Log.d(TAG, "已有有效的MediaProjection权限数据，直接使用");
-                        // 重新发送已有的权限数据给服务
-                        sendMediaProjectionResult(resultData);
-                        return;
-                    }
-
-                    // 尝试加载保存的权限数据
-                    Intent savedData = loadSavedMediaProjectionData();
-                    if (savedData != null) {
-                        Log.d(TAG, "找到保存的MediaProjection权限数据，使用保存的数据");
-                        resultData = savedData;
-                        mediaProjectionRequested = true;
-                        sendMediaProjectionResult(resultData);
-                        return;
-                    }
-
-                    // 没有有效的权限数据，需要重新请求
-                    Log.d(TAG, "没有有效的权限数据，需要重新请求");
-                    mediaProjectionRequested = false;
-                    resultData = null;
-
-                    // 检查服务是否存在
-                    if (FloatingWindowServiceHolder.getService() != null) {
-                        Log.d(TAG, "服务已存在，重新请求权限");
-                        requestMediaProjectionPermission();
-                    } else {
-                        Log.d(TAG, "无法找到服务实例，先启动服务");
-                        startFloatingWindow(null);
-                        // 延迟请求权限，确保服务已启动
-                        new Handler().postDelayed(() -> {
-                            requestMediaProjectionPermission();
-                        }, 1000);
-                    }
-                }
-            };
-
-            // 注册广播接收器，使用正确的导出标志
-            IntentFilter filter = new IntentFilter("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION");
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // 确保使用 RECEIVER_NOT_EXPORTED 标志
-                registerReceiver(permissionRequestReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-            } else {
-                registerReceiver(permissionRequestReceiver, filter);
-            }
-
-            Log.d(TAG, "截屏权限请求广播接收器已注册");
-        } catch (Exception e) {
-            Log.e(TAG, "注册截屏权限请求广播接收器失败: " + e.getMessage(), e);
-        }
-    }
+    // todo private void registerScreenCapturePermissionReceiver() {
+    // try {
+    // permissionRequestReceiver = new BroadcastReceiver() {
+    // @Override
+    // public void onReceive(Context context, Intent intent) {
+    // Log.d(TAG, "收到截屏权限请求广播");
+    //
+    // // 检查是否已有有效的权限数据
+    // if (mediaProjectionRequested && resultData != null) {
+    // Log.d(TAG, "已有有效的MediaProjection权限数据，直接使用");
+    // // 重新发送已有的权限数据给服务
+    // sendMediaProjectionResult(resultData);
+    // return;
+    // }
+    //
+    // // 尝试加载保存的权限数据
+    // Intent savedData = loadSavedMediaProjectionData();
+    // if (savedData != null) {
+    // Log.d(TAG, "找到保存的MediaProjection权限数据，使用保存的数据");
+    // resultData = savedData;
+    // mediaProjectionRequested = true;
+    // sendMediaProjectionResult(resultData);
+    // return;
+    // }
+    //
+    // // 没有有效的权限数据，需要重新请求
+    // Log.d(TAG, "没有有效的权限数据，需要重新请求");
+    // mediaProjectionRequested = false;
+    // resultData = null;
+    //
+    // // 检查服务是否存在
+    // if (FloatingWindowServiceHolder.getService() != null) {
+    // Log.d(TAG, "服务已存在，重新请求权限");
+    // requestMediaProjectionPermission();
+    // } else {
+    // Log.d(TAG, "无法找到服务实例，先启动服务");
+    // startFloatingWindow(null);
+    // // 延迟请求权限，确保服务已启动
+    // new Handler().postDelayed(() -> {
+    // requestMediaProjectionPermission();
+    // }, 1000);
+    // }
+    // }
+    // };
+    //
+    // // 注册广播接收器，使用正确的导出标志
+    // IntentFilter filter = new
+    // IntentFilter("com.titan.universe_share.REQUEST_SCREENSHOT_PERMISSION");
+    // if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    // // 确保使用 RECEIVER_NOT_EXPORTED 标志
+    // registerReceiver(permissionRequestReceiver, filter,
+    // Context.RECEIVER_NOT_EXPORTED);
+    // } else {
+    // registerReceiver(permissionRequestReceiver, filter);
+    // }
+    //
+    // Log.d(TAG, "截屏权限请求广播接收器已注册");
+    // } catch (Exception e) {
+    // Log.e(TAG, "注册截屏权限请求广播接收器失败: " + e.getMessage(), e);
+    // }
+    // }
 
     private void sendMediaProjectionResult(Intent data) {
         new Handler(Looper.getMainLooper()).post(() -> {
@@ -346,33 +386,47 @@ public class MainActivity extends FlutterActivity {
                 Toast.makeText(this, "需要悬浮窗权限才能正常工作", Toast.LENGTH_LONG).show();
             }
             return;
-        } else if (requestCode == REQUEST_CODE_MEDIA_PROJECTION) {
-            // MediaProjection不再使用，直接提示用户使用辅助功能服务
-            Log.d(TAG, "不再使用MediaProjection，改用辅助功能服务");
+        } else if (requestCode == RequestCode.START_MEDIA_PROJECTION) {
+            // 处理MediaProjection权限请求结果
+            Log.d(TAG, "收到MediaProjection授权结果: " + (resultCode == RESULT_OK ? "已授权" : "未授权"));
+            if (resultCode == RESULT_OK) {
+                // 权限授权成功，发送广播通知服务
+                Intent grantedIntent = new Intent(ACTION_MEDIA_PROJECTION_GRANTED);
+                sendBroadcast(grantedIntent);
+                Toast.makeText(this, "已获取屏幕录制权限", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "屏幕录制权限被拒绝，请启用辅助功能服务", Toast.LENGTH_LONG).show();
+            }
 
-            // 提示用户启用辅助功能服务
-            Toast.makeText(this, "请启用辅助功能服务以使用自动截图功能", Toast.LENGTH_LONG).show();
-
-            // 打开辅助功能设置
-            openAccessibilitySettings();
+//            if (resultCode == RESULT_OK && data != null) {
+//                // 将结果通过广播发送回Service
+//                Intent resultIntent = new Intent("com.titan.universe_share.MEDIA_PROJECTION_RESULT");
+//                resultIntent.putExtra("resultCode", resultCode);
+//                resultIntent.putExtra("resultData", data);
+//                sendBroadcast(resultIntent);
+//
+//                Log.d(TAG, "已发送MediaProjection结果广播");
+//
+//                // 可以选择保存授权数据以便将来使用
+//                // saveMediaProjectionData(resultCode, data);
+//
+//                Toast.makeText(this, "已获取屏幕录制权限", Toast.LENGTH_SHORT).show();
+//
+//                // 直接调用MediaProjectionHelper的处理方法
+//                MediaProjectionHelper.onStartResult(requestCode, resultCode, data);
+//            } else {
+//                // 用户拒绝了权限，提示用户使用辅助功能服务
+//                Toast.makeText(this, "屏幕录制权限被拒绝，请启用辅助功能服务", Toast.LENGTH_LONG).show();
+//                openAccessibilitySettings();
+//            }
 
             // 更新UI
             if (pendingResult != null) {
-                pendingResult.success(true);
+                pendingResult.success(resultCode == RESULT_OK);
                 pendingResult = null;
             }
 
             return;
-        } else if (requestCode == REQUEST_ACCESSIBILITY_SETTINGS) {
-            // 用户从辅助功能设置页面返回，检查是否已启用
-            if (isAccessibilityServiceEnabled()) {
-                Toast.makeText(this, "辅助功能服务已启用，可以开始使用截图功能", Toast.LENGTH_SHORT).show();
-
-                // 启动悬浮窗服务
-                startFloatingService();
-            } else {
-                Toast.makeText(this, "请启用辅助功能服务以支持自动截图功能", Toast.LENGTH_LONG).show();
-            }
         }
         super.onActivityResult(requestCode, resultCode, data);
     }

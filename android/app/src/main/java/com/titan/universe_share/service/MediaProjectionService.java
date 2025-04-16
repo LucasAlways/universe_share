@@ -18,13 +18,12 @@ import android.view.Surface;
 
 import androidx.annotation.Nullable;
 
-import com.titan.universe_share.App;
+import com.titan.universe_share.TitanApp;
 import com.titan.universe_share.constant.ServiceType;
 import com.titan.universe_share.utils.MediaProjectionHelper;
 import com.titan.universe_share.utils.NotificationHelper;
 import com.titan.universe_share.utils.ToastUtils;
-import com.titan.universe_share.utils.WindowHelper;
-import com.titan.universe_share.views.ProjectionView;
+
 
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -65,7 +64,7 @@ public class MediaProjectionService extends Service {
         } else if (serviceType == ServiceType.PROJECTION) {
             NotificationHelper.startMediaProjectionForeground(this, "投屏");
             mMediaProjection = MediaProjectionHelper.getManager().getMediaProjection(resultCode, resultData);
-            createProjectionVirtualDisplay();
+//            createProjectionVirtualDisplay();
         } else if (serviceType == ServiceType.VIDEO) {
             NotificationHelper.startMediaProjectionForeground(this, "录屏");
             mMediaProjection = MediaProjectionHelper.getManager().getMediaProjection(resultCode, resultData);
@@ -76,26 +75,26 @@ public class MediaProjectionService extends Service {
 
     private static void createImageReaderVirtualDisplay() {
         if (mMediaProjection != null) {
-            DisplayMetrics dm = WindowHelper.getRealMetrics();
-            mImageReader = ImageReader.newInstance(dm.widthPixels, dm.heightPixels, PixelFormat.RGBA_8888, 1);
+//TODO            DisplayMetrics dm = WindowHelper.getRealMetrics();
+//            mImageReader = ImageReader.newInstance(dm.widthPixels, dm.heightPixels, PixelFormat.RGBA_8888, 1);
             mImageReader.setOnImageAvailableListener(reader -> {
                 mImageAvailable = true;
             }, null);
             mMediaProjection.registerCallback(MEDIA_PROJECTION_CALLBACK, null);
-            mVirtualDisplayImageReader = mMediaProjection.createVirtualDisplay("ImageReader", dm.widthPixels, dm.heightPixels, dm.densityDpi, Display.FLAG_ROUND, mImageReader.getSurface(), null, null);
+//            mVirtualDisplayImageReader = mMediaProjection.createVirtualDisplay("ImageReader", dm.widthPixels, dm.heightPixels, dm.densityDpi, Display.FLAG_ROUND, mImageReader.getSurface(), null, null);
         }
     }
 
-    public static void createProjectionVirtualDisplay() {
-        if (mMediaProjection != null && ProjectionView.isSurfaceCreated()) {
-            DisplayMetrics dm = WindowHelper.getRealMetrics();
-            if (mVirtualDisplayProjection != null) {
-                mVirtualDisplayProjection.release();
-            }
-            mMediaProjection.registerCallback(MEDIA_PROJECTION_CALLBACK, null);
-            mVirtualDisplayProjection = mMediaProjection.createVirtualDisplay("Projection", dm.widthPixels, dm.heightPixels, dm.densityDpi, Display.FLAG_ROUND, WindowHelper.getProjectionSurface(), null, null);
-        }
-    }
+//TODO    public static void createProjectionVirtualDisplay() {
+//        if (mMediaProjection != null && ProjectionView.isSurfaceCreated()) {
+//            DisplayMetrics dm = WindowHelper.getRealMetrics();
+//            if (mVirtualDisplayProjection != null) {
+//                mVirtualDisplayProjection.release();
+//            }
+//            mMediaProjection.registerCallback(MEDIA_PROJECTION_CALLBACK, null);
+//            mVirtualDisplayProjection = mMediaProjection.createVirtualDisplay("Projection", dm.widthPixels, dm.heightPixels, dm.densityDpi, Display.FLAG_ROUND, WindowHelper.getProjectionSurface(), null, null);
+//        }
+//    }
 
     public static void createVideoVirtualDisplay() {
         if (mMediaProjection != null) {
@@ -110,30 +109,30 @@ public class MediaProjectionService extends Service {
             mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
             mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
             mMediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
-            mMediaRecorder.setOutputFile(App.getApp().getExternalFilesDir(null).getParent() + "/" + createVideoFileName());
-            DisplayMetrics dm = WindowHelper.getRealMetrics();
-            mMediaRecorder.setVideoSize(dm.widthPixels, dm.heightPixels);
+            mMediaRecorder.setOutputFile(TitanApp.getApp().getExternalFilesDir(null).getParent() + "/" + createVideoFileName());
+// TODO           DisplayMetrics dm = WindowHelper.getRealMetrics();
+//            mMediaRecorder.setVideoSize(dm.widthPixels, dm.heightPixels);
             mMediaRecorder.setVideoFrameRate(60);
             // 高一些，保证清晰度
             mMediaRecorder.setVideoEncodingBitRate(10 * 1024 * 1024);
         }
     }
 
-    public static void startVideoRecord() {
-        if (mMediaProjection != null && mMediaRecorder != null) {
-            try {
-                mMediaRecorder.prepare();
-                Surface surface = mMediaRecorder.getSurface();
-                DisplayMetrics dm = WindowHelper.getRealMetrics();
-                mMediaProjection.createVirtualDisplay("Video", dm.widthPixels, dm.heightPixels,
-                        dm.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                        surface, null, null);
-                mMediaRecorder.start();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-    }
+//TODO    public static void startVideoRecord() {
+//        if (mMediaProjection != null && mMediaRecorder != null) {
+//            try {
+//                mMediaRecorder.prepare();
+//                Surface surface = mMediaRecorder.getSurface();
+//                DisplayMetrics dm = WindowHelper.getRealMetrics();
+//                mMediaProjection.createVirtualDisplay("Video", dm.widthPixels, dm.heightPixels,
+//                        dm.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+//                        surface, null, null);
+//                mMediaRecorder.start();
+//            } catch (Exception e) {
+//                e.printStackTrace();
+//            }
+//        }
+//    }
 
     public static void stopVideoRecord() {
         if (mMediaRecorder != null) {
@@ -181,7 +180,7 @@ public class MediaProjectionService extends Service {
             bitmap.recycle();
 
             String fileName = createScreenshotFileName();
-            File file = new File(App.getApp().getExternalFilesDir(null).getParent(), fileName);
+            File file = new File(TitanApp.getApp().getExternalFilesDir(null).getParent(), fileName);
             if (!file.exists()) {
                 file.createNewFile();
             }

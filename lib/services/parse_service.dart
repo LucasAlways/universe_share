@@ -44,10 +44,19 @@ class ParseService {
   static String? _successfulServerUrl;
   static String? get successfulServerUrl => _successfulServerUrl;
 
+  // 手动设置服务器状态（主要用于测试或强制离线模式）
+  static void setServerAvailability(bool available) {
+    _isServerAvailable = available;
+    print('手动设置服务器状态: ${available ? '可用' : '不可用'}');
+  }
+
   // 初始化Parse服务
   static Future<void> initialize() async {
     try {
       print('开始初始化Parse服务...');
+
+      // 设置初始状态为不可用
+      _isServerAvailable = false;
 
       // 尝试不同的服务器地址
       for (var serverUrl in _serverUrls) {
@@ -55,6 +64,7 @@ class ParseService {
         if (await _tryInitializeWithUrl(serverUrl)) {
           print('成功连接到服务器: $serverUrl');
           _successfulServerUrl = serverUrl;
+          _isServerAvailable = true;
           return;
         }
         // 失败后继续尝试下一个地址
@@ -77,7 +87,7 @@ class ParseService {
     try {
       // 添加尝试次数限制和延迟
       int retryCount = 0;
-      const int maxRetries = 2;
+      const int maxRetries = 1; // 减少重试次数，加快离线模式判断
       bool initialized = false;
 
       print('开始尝试连接: $serverUrl');
@@ -112,8 +122,8 @@ class ParseService {
           print('异常类型: ${initError.runtimeType}');
           print('异常详情: ${initError.toString()}');
           if (retryCount < maxRetries) {
-            print('等待2秒后重试...');
-            await Future.delayed(const Duration(seconds: 2));
+            print('等待1秒后重试...'); // 减少等待时间
+            await Future.delayed(const Duration(seconds: 1));
           }
         }
       }
@@ -128,7 +138,7 @@ class ParseService {
       // 测试连接
       try {
         final response = await Parse().healthCheck().timeout(
-          const Duration(seconds: 5), // 增加超时时间
+          const Duration(seconds: 3), // 减少超时时间以加快判断
           onTimeout: () {
             print('健康检查超时！');
             return ParseResponse()

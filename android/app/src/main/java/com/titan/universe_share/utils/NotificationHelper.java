@@ -1,4 +1,4 @@
-package com.magicianguo.mediaprojectiondemo.util;
+package com.titan.universe_share.utils;
 
 import android.app.Activity;
 import android.app.Notification;
@@ -15,14 +15,14 @@ import android.provider.Settings;
 import androidx.appcompat.app.AlertDialog;
 import androidx.core.app.NotificationManagerCompat;
 
-import com.magicianguo.mediaprojectiondemo.App;
-import com.magicianguo.mediaprojectiondemo.R;
+import com.titan.universe_share.TitanApp;
+import com.titan.universe_share.R;
 
 public class NotificationHelper {
     private static final String CHANNEL_ID_MEDIA_PROJECTION = "CHANNEL_ID_MEDIA_PROJECTION";
     private static final String CHANNEL_NAME_MEDIA_PROJECTION = "屏幕录制";
     private static final int NOTIFICATION_ID_MEDIA_PROJECTION = 1;
-    private static final NotificationManager NOTIFICATION_MANAGER = (NotificationManager) App.getApp().getSystemService(Context.NOTIFICATION_SERVICE);
+    private static final NotificationManager NOTIFICATION_MANAGER = (NotificationManager) TitanApp.getApp().getSystemService(Context.NOTIFICATION_SERVICE);
 
     /**
      * 检查通知权限

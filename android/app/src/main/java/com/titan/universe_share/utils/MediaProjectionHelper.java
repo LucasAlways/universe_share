@@ -6,15 +6,13 @@ import android.content.Intent;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 
-import com.magicianguo.mediaprojectiondemo.App;
-
-
+import com.titan.universe_share.TitanApp;
 import com.titan.universe_share.constant.RequestCode;
 import com.titan.universe_share.service.MediaProjectionService;
 
 public class MediaProjectionHelper {
-    private static final MediaProjectionManager MEDIA_PROJECTION_MANAGER = (MediaProjectionManager) App.getApp().getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-    private static final Intent SERVICE_INTENT = new Intent(App.getApp(), MediaProjectionService.class);
+    private static final MediaProjectionManager MEDIA_PROJECTION_MANAGER = (MediaProjectionManager) TitanApp.getApp().getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+    private static final Intent SERVICE_INTENT = new Intent(TitanApp.getApp(), MediaProjectionService.class);
     private static boolean mStarted = false;
 
     public static MediaProjectionManager getManager() {
@@ -36,9 +34,9 @@ public class MediaProjectionHelper {
             MediaProjectionService.resultCode = resultCode;
             MediaProjectionService.resultData = resultData;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                App.getApp().startForegroundService(SERVICE_INTENT);
+                TitanApp.getApp().startForegroundService(SERVICE_INTENT);
             } else {
-                App.getApp().startService(SERVICE_INTENT);
+                TitanApp.getApp().startService(SERVICE_INTENT);
             }
             mStarted = true;
         } else {
@@ -50,7 +48,7 @@ public class MediaProjectionHelper {
         if (!mStarted) {
             return;
         }
-        App.getApp().stopService(SERVICE_INTENT);
+        TitanApp.getApp().stopService(SERVICE_INTENT);
         mStarted = false;
     }
 }
